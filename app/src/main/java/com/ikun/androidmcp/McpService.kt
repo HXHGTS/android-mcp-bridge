@@ -11,6 +11,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.location.Location
 import android.location.LocationManager
 import android.os.BatteryManager
@@ -22,10 +27,14 @@ import android.util.Log
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.Inet4Address
+import java.net.Inet6Address
 import java.security.KeyStore
 
 class McpService : Service() {
-    private val servers = mutableListOf<McpHttpServer>()
+    private val servers = linkedMapOf<String, McpHttpServer>()
+    private var connectivityManager: ConnectivityManager? = null
+    private var wifiCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -37,41 +46,106 @@ class McpService : Service() {
         } else startForeground(NOTIFICATION_ID, notification)
 
         try {
-            val v4 = McpHttpServer(this, "127.0.0.1")
-            val v6 = McpHttpServer(this, "::1")
-            v4.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
-            try {
-                v6.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
-            } catch (e: Exception) {
-                v4.stop()
-                throw IllegalStateException("IPv6 loopback listener could not start", e)
-            }
-            servers += v4
-            servers += v6
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putBoolean("running", true).putBoolean("ipv4_running", true).putBoolean("ipv6_running", true).apply()
+            connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            registerWifiNetworkCallback()
+            refreshListeners()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start dual-stack loopback MCP listeners", e)
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putBoolean("running", false).putBoolean("ipv4_running", false).putBoolean("ipv6_running", false).apply()
+            Log.e(TAG, "Failed to start loopback MCP listeners", e)
             stopSelf()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) stopSelf()
+        when (intent?.action) {
+            ACTION_STOP -> stopSelf()
+            ACTION_RECONFIGURE -> refreshListenersSafely()
+        }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        servers.forEach { runCatching { it.stop() } }
+        wifiCallback?.let { callback -> runCatching { connectivityManager?.unregisterNetworkCallback(callback) } }
+        wifiCallback = null
+        servers.values.forEach { runCatching { it.stop() } }
         servers.clear()
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-            .putBoolean("running", false).putBoolean("ipv4_running", false).putBoolean("ipv6_running", false).apply()
+            .putBoolean("running", false).putBoolean("ipv4_running", false).putBoolean("ipv6_running", false)
+            .putStringSet(KEY_LAN_HOSTS, emptySet()).apply()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun registerWifiNetworkCallback() {
+        val cm = connectivityManager ?: return
+        val request = NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build()
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = refreshListenersSafely()
+            override fun onLost(network: Network) = refreshListenersSafely()
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) = refreshListenersSafely()
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) = refreshListenersSafely()
+        }
+        cm.registerNetworkCallback(request, callback)
+        wifiCallback = callback
+    }
+
+    @Synchronized
+    private fun refreshListenersSafely() {
+        runCatching { refreshListeners() }.onFailure { Log.e(TAG, "Listener refresh failed", it) }
+    }
+
+    @Synchronized
+    private fun refreshListeners() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val desired = linkedSetOf(IPV4_LOOPBACK, IPV6_LOOPBACK)
+        if (prefs.getBoolean(KEY_LAN_ENABLED, false)) desired.addAll(wifiPrivateAddresses())
+
+        val obsolete = servers.keys.filter { it !in desired }
+        obsolete.forEach { host -> servers.remove(host)?.let { runCatching { it.stop() } } }
+
+        for (host in desired) {
+            if (servers.containsKey(host)) continue
+            val server = McpHttpServer(this, host)
+            try {
+                server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+                servers[host] = server
+            } catch (e: Exception) {
+                runCatching { server.stop() }
+                if (host == IPV4_LOOPBACK || host == IPV6_LOOPBACK) throw e
+                Log.w(TAG, "Could not bind Wi-Fi LAN address $host", e)
+            }
+        }
+
+        val ipv4 = servers.containsKey(IPV4_LOOPBACK)
+        val ipv6 = servers.containsKey(IPV6_LOOPBACK)
+        val lanHosts = servers.keys.filter { it != IPV4_LOOPBACK && it != IPV6_LOOPBACK }.toSet()
+        prefs.edit().putBoolean("running", ipv4 && ipv6)
+            .putBoolean("ipv4_running", ipv4).putBoolean("ipv6_running", ipv6)
+            .putStringSet(KEY_LAN_HOSTS, lanHosts).apply()
+    }
+
+    private fun wifiPrivateAddresses(): Set<String> {
+        val cm = connectivityManager ?: return emptySet()
+        val result = linkedSetOf<String>()
+        for (network in cm.allNetworks) {
+            val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull() ?: continue
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+            val links = runCatching { cm.getLinkProperties(network)?.linkAddresses }.getOrNull().orEmpty()
+            for (link in links) {
+                val address = link.address
+                val allowed = when (address) {
+                    is Inet4Address -> address.isSiteLocalAddress && !address.isLoopbackAddress
+                    is Inet6Address -> {
+                        val bytes = address.address
+                        bytes.isNotEmpty() && (bytes[0].toInt() and 0xFE) == 0xFC
+                    }
+                    else -> false
+                }
+                if (allowed) address.hostAddress?.substringBefore('%')?.let { result.add(it) }
+            }
+        }
+        return result
+    }
 
     private fun removeLegacySecret() {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("access_key_v1").apply()
@@ -97,7 +171,7 @@ class McpService : Service() {
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID) else Notification.Builder(this)
         return builder.setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setContentTitle("Android MCP Bridge Lite 正在运行")
-            .setContentText("仅监听 127.0.0.1 与 ::1；无密钥、无公网监听")
+            .setContentText("无令牌；仅本机，或用户开启后绑定 Wi-Fi 私有地址")
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "停止", stop).build())
             .build()
@@ -256,7 +330,12 @@ class McpService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.ikun.androidmcp.STOP"
+        const val ACTION_RECONFIGURE = "com.ikun.androidmcp.RECONFIGURE"
         private const val PREFS = "mcp_server"
+        private const val KEY_LAN_ENABLED = "lan_enabled"
+        private const val KEY_LAN_HOSTS = "lan_hosts"
+        private const val IPV4_LOOPBACK = "127.0.0.1"
+        private const val IPV6_LOOPBACK = "::1"
         private const val CHANNEL_ID = "mcp_server"
         private const val NOTIFICATION_ID = 18765
         private const val TAG = "AndroidMcpBridge"

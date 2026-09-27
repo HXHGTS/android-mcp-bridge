@@ -10,14 +10,17 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Process
 import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 
@@ -25,6 +28,8 @@ class MainActivity : Activity() {
     private lateinit var root: LinearLayout
     private lateinit var status: TextView
     private lateinit var endpointView: TextView
+    private lateinit var lanSwitch: Switch
+    private var changingLanSwitch = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,14 +49,22 @@ class MainActivity : Activity() {
         setContentView(scroll)
 
         root.addView(text("Android MCP Bridge · Lite", 25f, true))
-        root.addView(text("简版：无 Bearer 密钥，只绑定本机 IPv4/IPv6 回环地址。", 15f, false, 0xFF49454F.toInt()))
+        root.addView(text("本机 MCP 服务，无令牌认证；权限由你在安卓系统中逐项确认。", 15f, false, 0xFF49454F.toInt()))
         root.addView(spacer(14))
         status = text("权限状态读取中…", 14f, true)
         root.addView(status)
-        root.addView(button("申请位置与通知显示权限") { askForRuntimePermissions() })
-        root.addView(button("打开通知读取授权设置") { openSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS) })
-        root.addView(button("打开使用情况访问设置") { openSettings(Settings.ACTION_USAGE_ACCESS_SETTINGS) })
-        root.addView(text("通知读取和使用情况访问由安卓系统单独控制；须在设置页明确授权。", 13f, false, 0xFF625B71.toInt()))
+        root.addView(button("申请常用运行时权限") { askForRuntimePermissions() })
+        root.addView(button("申请后台定位权限") { requestBackgroundLocation() })
+
+        root.addView(spacer(10))
+        root.addView(text("特殊访问（需在系统设置中手动开启）", 17f, true))
+        root.addView(button("通知读取设置") { openSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS) })
+        root.addView(button("使用情况访问设置") { openSettings(Settings.ACTION_USAGE_ACCESS_SETTINGS) })
+        root.addView(button("所有文件访问设置") { openSettings(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")) })
+        root.addView(button("悬浮窗访问设置") { openSettings(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")) })
+        root.addView(button("修改系统设置权限") { openSettings(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName")) })
+        root.addView(button("忽略电池优化设置") { openSettings(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")) })
+        root.addView(text("以上授权不会被静默开启；本版 MCP 目前只调用已实现并列出的工具。系统签名、设备所有者、root 等权限普通 App 无法取得。", 13f, false, 0xFF625B71.toInt()))
 
         root.addView(spacer(18))
         root.addView(text("MCP 服务", 18f, true))
@@ -59,18 +72,25 @@ class MainActivity : Activity() {
         root.addView(endpointView)
         root.addView(button("启动本机 MCP 服务") { startMcp() })
         root.addView(button("停止 MCP 服务") { stopService(Intent(this, McpService::class.java)); refresh() })
-        root.addView(button("复制 IPv4 MCP 地址") { copyAddress("IPv4 MCP 地址", IPV4_URL) })
-        root.addView(button("复制 IPv6 MCP 地址") { copyAddress("IPv6 MCP 地址", IPV6_URL) })
-        root.addView(button("复制双栈地址（两行）") { copyAddress("IPv4 + IPv6 MCP 地址", "$IPV4_URL\n$IPV6_URL") })
-        root.addView(text("IPv4：$IPV4_URL\nIPv6：$IPV6_URL\nRikkaHub 与本 App 必须在同一台手机上。", 13f, false, 0xFF49454F.toInt()))
+        root.addView(button("复制 IPv4 本机 MCP 地址") { copyAddress("IPv4 本机地址", IPV4_URL) })
+        root.addView(button("复制 IPv6 本机 MCP 地址") { copyAddress("IPv6 本机地址", IPV6_URL) })
+        root.addView(button("复制当前局域网 MCP 地址") { copyLanAddresses() })
 
         root.addView(spacer(14))
-        root.addView(text("工具", 18f, true))
-        root.addView(text("• device.battery：电量、充电状态、省电模式\n• device.location：系统缓存的最后位置（需定位授权；不持续跟踪）\n• device.notifications：当前活动通知（需开启通知读取）\n• device.usage：近 1–168 小时应用前台使用时长（需开启使用情况访问）", 14f, false, 0xFF49454F.toInt()))
+        root.addView(text("局域网访问", 18f, true))
+        lanSwitch = Switch(this).apply {
+            text = "允许同一局域网连接（默认关闭）"
+            textSize = 15f
+            isChecked = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_LAN_ENABLED, false)
+            setOnCheckedChangeListener { _, checked -> onLanSwitchChanged(checked) }
+        }
+        root.addView(lanSwitch)
+        root.addView(text("关闭时仅本机 127.0.0.1 与 ::1 可连接。开启后仅绑定 Wi‑Fi 私有 IPv4 / IPv6 ULA 地址，不绑定蜂窝网接口或公网 IPv6；局域网内其他设备无需令牌即可访问 MCP 数据。开启前会再次确认。", 13f, false, 0xFF8B2E2E.toInt()))
 
         root.addView(spacer(14))
-        root.addView(text("安全提醒：本版按你的要求移除 MCP 密钥，仅监听 127.0.0.1 和 ::1，不对局域网/互联网开放。但同一台手机上的其他 App 也可能访问本地端口；通知正文和应用使用时长可能包含隐私，请勿通过代理把此服务转发到外部网络。", 13f, false, 0xFF8B2E2E.toInt()))
-        root.addView(text("服务由用户手动启动，运行时显示常驻通知；无自启动、无后台定位、无数据上传。", 13f, false, 0xFF625B71.toInt()))
+        root.addView(text("当前 MCP 工具", 18f, true))
+        root.addView(text("• device.battery：电量、充电状态、省电模式\n• device.location：系统缓存的最后位置（需定位授权）\n• device.notifications：当前活动通知标题/正文（需通知读取授权）\n• device.usage：近 1–168 小时应用前台使用时长（需使用情况访问授权）", 14f, false, 0xFF49454F.toInt()))
+        root.addView(text("没有发短信、拨号、删文件等写操作工具。通知、位置、使用情况都可能包含敏感信息。", 13f, false, 0xFF625B71.toInt()))
     }
 
     private fun maybeFirstRunPrompt() {
@@ -79,47 +99,148 @@ class MainActivity : Activity() {
         prefs.edit().putBoolean("lite_intro_shown", true).apply()
         root.post {
             AlertDialog.Builder(this)
-                .setTitle("配置可选授权")
-                .setMessage("通知读取与使用情况访问都由系统设置管理。授权后，设备智能体可通过本机 MCP 查看当前通知和应用使用时长。")
+                .setTitle("权限与局域网配置")
+                .setMessage("可以申请常用权限，并在系统设置中开启通知读取、使用情况访问等特殊访问。局域网监听默认关闭；开启后同一 Wi‑Fi 网络中的设备无需令牌即可访问已开放的 MCP 工具。")
                 .setNegativeButton("稍后", null)
-                .setPositiveButton("打开授权设置") { _, _ ->
-                    runCatching { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
-                }
+                .setPositiveButton("申请常用权限") { _, _ -> askForRuntimePermissions() }
                 .show()
         }
     }
 
-    private fun askForRuntimePermissions() {
-        val candidates = mutableListOf(
+    private fun runtimePermissions(): List<String> {
+        val p = mutableListOf(
             Manifest.permission.ACCESS_COARSE_LOCATION,
-            Manifest.permission.ACCESS_FINE_LOCATION
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.WRITE_CONTACTS,
+            Manifest.permission.READ_CALENDAR,
+            Manifest.permission.WRITE_CALENDAR,
+            Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.BODY_SENSORS
         )
-        if (Build.VERSION.SDK_INT >= 33) candidates += Manifest.permission.POST_NOTIFICATIONS
-        val missing = candidates.distinct().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isEmpty()) Toast.makeText(this, "当前可请求权限已授权", Toast.LENGTH_SHORT).show()
-        else requestPermissions(missing.toTypedArray(), 301)
+        if (Build.VERSION.SDK_INT >= 29) p += Manifest.permission.ACTIVITY_RECOGNITION
+        if (Build.VERSION.SDK_INT >= 31) {
+            p += Manifest.permission.BLUETOOTH_CONNECT
+            p += Manifest.permission.BLUETOOTH_SCAN
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            p += Manifest.permission.POST_NOTIFICATIONS
+            p += Manifest.permission.NEARBY_WIFI_DEVICES
+            p += Manifest.permission.READ_MEDIA_IMAGES
+            p += Manifest.permission.READ_MEDIA_VIDEO
+            p += Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            p += Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (Build.VERSION.SDK_INT >= 34) p += Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+        return p.distinct()
+    }
+
+    private fun askForRuntimePermissions() {
+        val missing = runtimePermissions().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isEmpty()) Toast.makeText(this, "可请求的常用运行时权限已授权", Toast.LENGTH_SHORT).show()
+        else requestPermissions(missing.toTypedArray(), REQUEST_RUNTIME)
+    }
+
+    private fun requestBackgroundLocation() {
+        if (Build.VERSION.SDK_INT < 29) {
+            Toast.makeText(this, "当前系统没有单独的后台定位权限", Toast.LENGTH_SHORT).show(); return
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "请先授权前台定位，再申请后台定位", Toast.LENGTH_LONG).show(); return
+        }
+        requestPermissions(arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION), REQUEST_BACKGROUND_LOCATION)
     }
 
     private fun refresh() {
         if (!::status.isInitialized) return
-        val rows = listOf(
-            "定位" to listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
-        )
-        val lines = rows.map { (label, perms) ->
-            val ok = perms.any { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
-            "${if (ok) "✓" else "○"} $label"
-        }.toMutableList()
-        if (Build.VERSION.SDK_INT >= 33) lines += "${if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) "✓" else "○"} 通知显示权限"
+        val permissions = runtimePermissions()
+        val granted = permissions.count { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+        val lines = mutableListOf("运行时权限：$granted/${permissions.size} 项已授权")
         lines += "${if (notificationAccessGranted()) "✓" else "○"} 通知读取"
         lines += "${if (usageAccessGranted()) "✓" else "○"} 使用情况访问"
-        status.text = "授权状态\n" + lines.joinToString("\n")
+        lines += "${if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) "✓" else "○"} 所有文件访问"
+        lines += "${if (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this)) "✓" else "○"} 悬浮窗"
+        lines += "${if (Build.VERSION.SDK_INT < 23 || Settings.System.canWrite(this)) "✓" else "○"} 修改系统设置"
+        if (Build.VERSION.SDK_INT >= 29) lines += "${if (checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED) "✓" else "○"} 后台定位"
+        status.text = lines.joinToString("\n")
 
-        val prefs = getSharedPreferences("mcp_server", MODE_PRIVATE)
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         val running = prefs.getBoolean("running", false)
-        val v4 = prefs.getBoolean("ipv4_running", false)
-        val v6 = prefs.getBoolean("ipv6_running", false)
-        endpointView.text = if (running) "服务运行中：IPv4 ${if (v4) "✓" else "×"}；IPv6 ${if (v6) "✓" else "×"}\n$IPV4_URL\n$IPV6_URL" else "服务尚未启动"
+        val lanEnabled = prefs.getBoolean(KEY_LAN_ENABLED, false)
+        val lanHosts = prefs.getStringSet(KEY_LAN_HOSTS, emptySet()).orEmpty().sorted()
+        val lanUrls = lanHosts.map { hostToUrl(it) }
+        endpointView.text = buildString {
+            append(if (running) "服务运行中" else "服务尚未启动")
+            append("\n本机 IPv4：$IPV4_URL\n本机 IPv6：$IPV6_URL")
+            append("\n局域网开关：${if (lanEnabled) "开" else "关"}")
+            if (lanEnabled) append("\n局域网地址：${if (lanUrls.isEmpty()) "未发现可绑定的 Wi‑Fi 私有地址" else lanUrls.joinToString("\n")}")
+            append("\n监听状态：IPv4 ${if (prefs.getBoolean("ipv4_running", false)) "✓" else "×"} / IPv6 ${if (prefs.getBoolean("ipv6_running", false)) "✓" else "×"}")
+        }
+        setLanSwitchChecked(lanEnabled)
     }
+
+    private fun onLanSwitchChanged(checked: Boolean) {
+        if (changingLanSwitch) return
+        if (!checked) {
+            setLanEnabled(false)
+            return
+        }
+        setLanSwitchChecked(false)
+        AlertDialog.Builder(this)
+            .setTitle("开启局域网 MCP？")
+            .setMessage("开启后，同一 Wi‑Fi 局域网内的设备无需令牌即可读取本 App 暴露的工具数据。请只在可信网络启用；不会绑定蜂窝网或公网 IPv6。")
+            .setNegativeButton("保持关闭", null)
+            .setPositiveButton("我了解，开启") { _, _ -> setLanEnabled(true) }
+            .show()
+    }
+
+    private fun setLanEnabled(enabled: Boolean) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_LAN_ENABLED, enabled).apply()
+        setLanSwitchChecked(enabled)
+        if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("running", false)) {
+            runCatching { startService(Intent(this, McpService::class.java).setAction(McpService.ACTION_RECONFIGURE)) }
+        }
+        root.postDelayed({ refresh() }, 350)
+    }
+
+    private fun setLanSwitchChecked(value: Boolean) {
+        if (!::lanSwitch.isInitialized) return
+        changingLanSwitch = true
+        lanSwitch.isChecked = value
+        changingLanSwitch = false
+    }
+
+    private fun startMcp() {
+        try {
+            val i = Intent(this, McpService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+            Toast.makeText(this, "正在启动 MCP 服务", Toast.LENGTH_SHORT).show()
+            root.postDelayed({ refresh() }, 700)
+        } catch (e: Exception) {
+            Toast.makeText(this, "启动失败：${e.message ?: "请检查系统限制"}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun copyAddress(label: String, value: String) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+        Toast.makeText(this, "$label 已复制", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun copyLanAddresses() {
+        val hosts = getSharedPreferences(PREFS, MODE_PRIVATE).getStringSet(KEY_LAN_HOSTS, emptySet()).orEmpty()
+        val urls = hosts.map { hostToUrl(it) }
+        if (urls.isEmpty()) {
+            Toast.makeText(this, "当前没有局域网监听地址；开启开关并连接 Wi‑Fi", Toast.LENGTH_LONG).show(); return
+        }
+        copyAddress("局域网 MCP 地址", urls.joinToString("\n"))
+    }
+
+    private fun hostToUrl(host: String): String = if (host.contains(":")) "http://[$host]:18765/mcp" else "http://$host:18765/mcp"
 
     private fun notificationAccessGranted(): Boolean {
         val enabled = Settings.Secure.getString(contentResolver, "enabled_notification_listeners").orEmpty()
@@ -132,32 +253,18 @@ class MainActivity : Activity() {
         return ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
     }
 
-    private fun startMcp() {
-        try {
-            val i = Intent(this, McpService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
-            Toast.makeText(this, "正在启动双栈本机 MCP 服务", Toast.LENGTH_SHORT).show()
-            root.postDelayed({ refresh() }, 500)
-        } catch (e: Exception) {
-            Toast.makeText(this, "启动失败：${e.message ?: "请检查系统限制"}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun copyAddress(label: String, value: String) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
-        Toast.makeText(this, "$label 已复制", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun openSettings(action: String) {
-        runCatching { startActivity(Intent(action)) }
-            .onFailure { Toast.makeText(this, "系统未提供该设置页", Toast.LENGTH_SHORT).show() }
+    private fun openSettings(action: String, uri: Uri? = null) {
+        runCatching {
+            val intent = Intent(action)
+            if (uri != null) intent.data = uri
+            startActivity(intent)
+        }.onFailure { Toast.makeText(this, "系统未提供该设置页", Toast.LENGTH_SHORT).show() }
     }
 
     @Deprecated("Android permission callback retained for broad API compatibility")
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 301) refresh()
+        if (requestCode == REQUEST_RUNTIME || requestCode == REQUEST_BACKGROUND_LOCATION) refresh()
     }
 
     override fun onResume() { super.onResume(); if (::root.isInitialized) refresh() }
@@ -173,6 +280,11 @@ class MainActivity : Activity() {
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     companion object {
+        private const val PREFS = "mcp_server"
+        private const val KEY_LAN_ENABLED = "lan_enabled"
+        private const val KEY_LAN_HOSTS = "lan_hosts"
+        private const val REQUEST_RUNTIME = 301
+        private const val REQUEST_BACKGROUND_LOCATION = 302
         private const val IPV4_URL = "http://127.0.0.1:18765/mcp"
         private const val IPV6_URL = "http://[::1]:18765/mcp"
     }
