@@ -30,10 +30,4 @@ MCP 使用 Streamable HTTP、协议版本 `2025-03-26`，不需要 Authorization
 
 GitHub Actions 在 push 到 `main` 后只构建 debug APK 并上传 30 天 artifact，**不会自动创建 Release**。Release 仅由 `workflow_dispatch` 手动触发：填写 `release_tag` 后才会发布 APK 与 SHA256SUMS；留空则仅构建。手动发布时 APK `versionName` 取标签去掉可选 `v` 前缀后的版本号。
 
-当前 `minSdk=26`、`targetSdk=36`；本地构建：
-
-```sh
-gradle --no-daemon :app:assembleDebug
-```
-
-APK 输出：`app/build/outputs/apk/debug/app-debug.apk`。
+本项目后续构建**完全在 GitHub Actions**执行，不在 SpeedyPage 或其他本机/服务器构建。push `main` 只产 debug artifact；带 tag 的手动 Release 也只由 GitHub Actions 构建。当前 `minSdk=26`、`targetSdk=36`。请从 Actions artifact 或 GitHub Release 获取 APK。允许本地静态检查源码，但不要在 SpeedyPage 构建 APK。

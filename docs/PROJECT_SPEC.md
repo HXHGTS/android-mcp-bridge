@@ -10,6 +10,7 @@
 - 不使用 Bearer token（RikkaHub 无自定义 token 支持）。LAN 监听默认关闭；用户开启后仅绑定当前 Wi‑Fi 的私有 IPv4 / ULA IPv6，界面二次确认。开启后同网段其他设备也能访问，不假设来访者只有 RikkaHub。
 - push `main`：只构建 APK artifact。
 - Release：仅 `workflow_dispatch` 手动触发并填写 tag；Release APK 使用固化的正式签名 keystore，附 SHA256SUMS。私钥/口令只存私有 `ikun-vault` 与 GitHub Actions secrets，禁止进公开代码仓。
+- **构建环境唯一为 GitHub Actions**：禁止调用新加坡 SpeedyPage 或其他服务器/本机执行 Android APK 构建；本机只允许静态源码检查。
 
 ## 权限模型
 
