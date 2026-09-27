@@ -26,9 +26,11 @@ MCP 使用 Streamable HTTP、协议版本 `2025-03-26`，不需要 Authorization
 
 通知内容、位置与使用情况属于敏感数据。Lite 版无令牌，LAN 默认关闭；只在可信网络中按需启用。
 
-## 构建
+## 构建与 Release
 
-GitHub Actions 在 push 到 `main` 后以 JDK 17、Android SDK 36 构建 debug APK，并上传 30 天 workflow artifact。当前 `minSdk=26`、`targetSdk=36`。
+GitHub Actions 在 push 到 `main` 后只构建 debug APK 并上传 30 天 artifact，**不会自动创建 Release**。Release 仅由 `workflow_dispatch` 手动触发：填写 `release_tag` 后才会发布 APK 与 SHA256SUMS；留空则仅构建。手动发布时 APK `versionName` 取标签去掉可选 `v` 前缀后的版本号。
+
+当前 `minSdk=26`、`targetSdk=36`；本地构建：
 
 ```sh
 gradle --no-daemon :app:assembleDebug
