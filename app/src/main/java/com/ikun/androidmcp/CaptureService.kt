@@ -17,6 +17,7 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
+import android.media.MediaCodec
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -147,7 +148,7 @@ class CaptureService : Service() {
 
     private fun buildNotification(): Notification {
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID) else @Suppress("DEPRECATION") Notification.Builder(this)
-        return builder.setSmallIcon(android.R.drawable.stat_sys_camera)
+        return builder.setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentTitle("Android MCP Bridge 采集中")
             .setContentText("用户授权的采集会话正在运行")
             .setOngoing(true)
@@ -277,8 +278,9 @@ class CaptureService : Service() {
                 rec.setVideoFrameRate(30)
                 rec.setVideoEncodingBitRate(8_000_000)
                 rec.setOutputFile(file.absolutePath)
+                val surface = MediaCodec.createPersistentInputSurface()
+                rec.setInputSurface(surface)
                 rec.prepare()
-                val surface = rec.createInputSurface()
                 recordDisplay = proj.createVirtualDisplay("mcp-rec", metrics.widthPixels, metrics.heightPixels,
                     metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surface, null, null)
                 rec.start()

@@ -156,7 +156,7 @@ object MediaStoreKit {
         if (!dir.isDirectory) throw IllegalArgumentException("路径不是目录")
         val limit = args.optInt("limit", 200).coerceIn(1, 2000)
         val rows = JSONArray()
-        val names = dir.list()?.sorted() ?: emptyArray()
+        val names = dir.list()?.sorted() ?: emptyList<String>()
         for (name in names) {
             if (rows.length() >= limit) break
             val entry = File(dir, name)
