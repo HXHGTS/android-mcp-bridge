@@ -38,3 +38,14 @@
 - push 到 `main` 只构建 APK artifact，不创建 Release。
 - GitHub Release 只能经 `workflow_dispatch` 手动触发；填写 `release_tag` 才会发布，并附 APK 与 SHA256。
 - 正式/预发布前需完成权限矩阵、`tools/list`、读写操作确认、IPv4/IPv6 loopback/LAN 防火墙范围、Android 16/17 安装与权限测试。
+
+## 特权执行后端（可选，不静默提权）
+
+Android 不能让普通 App 自己授予 ADB、Shizuku 或 root 权限。后续可做 provider adapter：
+
+- **Shizuku**：用户先在 Shizuku App 中按系统流程启动服务，再由本 App 发起 Shizuku 授权请求；每次检查 `permission granted` 状态，未授权时工具返回明确错误并引导用户。
+- **ADB/wireless debugging**：必须由用户在开发者选项中启用并完成配对/启动；Bridge 不尝试绕过配对、复用他人证书或隐藏启动。
+- **Root**：只在设备本来已 root 且用户通过 root 管理器批准时，可选接入；不捆绑漏洞利用或静默提权代码。
+- 即使通过 Shizuku/ADB，MCP 暴露的仍是具名、参数校验的工具；默认不提供任意 shell/任意命令执行接口。局域网无令牌时暴露通用 shell 等同把设备控制权交给同网段所有设备。
+
+所有高风险写操作（发消息、拨号、删除/修改数据、安装/卸载、修改安全设置）必须通过 App 的设备端确认队列；用户确认前工具返回待确认状态。屏幕操作需用户手动开启 Accessibility，并有可见的活动状态/停止按钮；截屏/录屏及相机/麦克风采集要求 Android 系统授权和前台可见指示。
