@@ -1,5 +1,6 @@
 package com.ikun.androidmcp
 
+import android.app.ActivityManager
 import android.app.AppOpsManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -9,6 +10,11 @@ import android.app.Service
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
+import android.content.ContentValues
+import android.content.ContentUris
+import android.provider.ContactsContract
+import android.provider.CalendarContract
+import android.telephony.TelephonyManager
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
@@ -18,10 +24,14 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.location.Location
 import android.location.LocationManager
+import android.hardware.Sensor
+import android.hardware.SensorManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.Process
+import android.os.Environment
+import android.os.StatFs
 import android.provider.Settings
 import android.util.Log
 import fi.iki.elonen.NanoHTTPD
@@ -30,6 +40,10 @@ import org.json.JSONObject
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.security.KeyStore
+import java.io.InputStreamReader
+import java.util.TimeZone
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class McpService : Service() {
     private val servers = linkedMapOf<String, McpHttpServer>()
@@ -170,7 +184,7 @@ class McpService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID) else Notification.Builder(this)
         return builder.setSmallIcon(android.R.drawable.stat_sys_upload_done)
-            .setContentTitle("Android MCP Bridge Lite 正在运行")
+            .setContentTitle("Android MCP Bridge 正在运行")
             .setContentText("无令牌；仅本机，或用户开启后绑定 Wi-Fi 私有地址")
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "停止", stop).build())
@@ -195,7 +209,7 @@ class McpService : Service() {
                         .put("result", JSONObject()
                             .put("protocolVersion", "2025-03-26")
                             .put("capabilities", JSONObject().put("tools", JSONObject().put("listChanged", false)))
-                            .put("serverInfo", JSONObject().put("name", "android-mcp-bridge-lite").put("version", "0.2.0"))))
+                            .put("serverInfo", JSONObject().put("name", "android-mcp-bridge").put("version", "0.4.0"))))
                     "notifications/initialized", "notifications/cancelled" -> newFixedLengthResponse(Response.Status.ACCEPTED, "application/json", "")
                     "ping" -> jsonResponse(result(id, JSONObject()))
                     "tools/list" -> jsonResponse(result(id, toolList()))
@@ -211,6 +225,37 @@ class McpService : Service() {
 
         private fun toolList(): JSONObject {
             val tools = JSONArray()
+            tools.put(JSONObject().put("name", "device.info")
+                .put("description", "读取 Android 版本、设备型号、ABI、屏幕、内存与存储等非序列号型设备信息。")
+                .put("inputSchema", emptySchema()))
+            tools.put(JSONObject().put("name", "device.hardware")
+                .put("description", "读取系统硬件特性清单与传感器列表。")
+                .put("inputSchema", emptySchema()))
+            tools.put(JSONObject().put("name", "device.apps.list")
+                .put("description", "列出本机已安装应用的包名、标签、版本与系统应用标记。")
+                .put("inputSchema", emptySchema()))
+            tools.put(JSONObject().put("name", "device.permissions.status")
+                .put("description", "检查本 App 已声明权限的授权状态及关键特殊访问状态。")
+                .put("inputSchema", emptySchema()))
+            tools.put(JSONObject().put("name", "device.settings.brightness.get")
+                .put("description", "读取屏幕亮度；系统特殊权限开启时也可调用。")
+                .put("inputSchema", emptySchema()))
+            if (canWriteData() && Settings.System.canWrite(app)) {
+                tools.put(JSONObject().put("name", "device.settings.brightness.set")
+                    .put("description", "设置亮度0–255；需系统 WRITE_SETTINGS 授权、写工具开关和 confirm=true。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("value", JSONObject().put("type", "integer"))
+                        .put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("value").put("confirm"))))
+            }
+            tools.put(JSONObject().put("name", "device.network")
+                .put("description", "读取当前网络传输类型、接口及本机地址概况。")
+                .put("inputSchema", emptySchema()))
+            if (hasPermission(android.Manifest.permission.READ_PHONE_STATE)) {
+                tools.put(JSONObject().put("name", "device.telephony.status")
+                    .put("description", "读取电话类型、SIM/网络状态和运营商名；不会读取 IMEI/设备序列号。")
+                    .put("inputSchema", emptySchema()))
+            }
             tools.put(JSONObject().put("name", "device.battery")
                 .put("description", "读取本机电池电量、充电状态和省电模式。")
                 .put("inputSchema", emptySchema()))
@@ -225,6 +270,89 @@ class McpService : Service() {
                 .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
                     .put("hours", JSONObject().put("type", "integer").put("description", "查询最近1到168小时，默认24")))
                     .put("required", JSONArray())))
+            if (hasPermission(android.Manifest.permission.READ_CONTACTS)) {
+                tools.put(JSONObject().put("name", "contacts.search")
+                    .put("description", "按姓名或电话号码搜索联系人；限制返回条数。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("query", JSONObject().put("type", "string"))
+                        .put("limit", JSONObject().put("type", "integer")))
+                        .put("required", JSONArray())))
+            }
+            if (hasPermission(android.Manifest.permission.READ_CALENDAR)) {
+                tools.put(JSONObject().put("name", "calendar.calendars")
+                    .put("description", "读取用户可访问的日历 ID 与名称。")
+                    .put("inputSchema", emptySchema()))
+                tools.put(JSONObject().put("name", "calendar.list")
+                    .put("description", "读取指定时间范围的日历事件。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("startMs", JSONObject().put("type", "integer"))
+                        .put("endMs", JSONObject().put("type", "integer"))
+                        .put("limit", JSONObject().put("type", "integer"))).put("required", JSONArray())))
+            }
+            if (canWriteData() && hasPermission(android.Manifest.permission.WRITE_CONTACTS)) {
+                tools.put(JSONObject().put("name", "contacts.create")
+                    .put("description", "新增联系人；需要全局写工具开关与参数 confirm=true。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("name", JSONObject().put("type", "string"))
+                        .put("phone", JSONObject().put("type", "string"))
+                        .put("email", JSONObject().put("type", "string"))
+                        .put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("name").put("confirm"))))
+                tools.put(JSONObject().put("name", "contacts.update")
+                    .put("description", "按 rawContactId 更新联系人姓名/电话/邮箱；需要 confirm=true。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("rawContactId", JSONObject().put("type", "string"))
+                        .put("name", JSONObject().put("type", "string"))
+                        .put("phone", JSONObject().put("type", "string"))
+                        .put("email", JSONObject().put("type", "string"))
+                        .put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("rawContactId").put("confirm"))))
+                tools.put(JSONObject().put("name", "contacts.delete")
+                    .put("description", "删除一个 rawContactId；需要 confirm=true。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("rawContactId", JSONObject().put("type", "string"))
+                        .put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("rawContactId").put("confirm"))))
+            }
+            if (canWriteData() && hasPermission(android.Manifest.permission.WRITE_CALENDAR)) {
+                tools.put(JSONObject().put("name", "calendar.create")
+                    .put("description", "新建日历事件；需要 confirm=true。时间使用 Unix 毫秒。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("calendarId", JSONObject().put("type", "integer"))
+                        .put("title", JSONObject().put("type", "string"))
+                        .put("startMs", JSONObject().put("type", "integer"))
+                        .put("endMs", JSONObject().put("type", "integer"))
+                        .put("description", JSONObject().put("type", "string"))
+                        .put("location", JSONObject().put("type", "string"))
+                        .put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("calendarId").put("title").put("startMs").put("endMs").put("confirm"))))
+                tools.put(JSONObject().put("name", "calendar.update")
+                    .put("description", "更新日历事件字段；需要 confirm=true。时间使用 Unix 毫秒。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("eventId", JSONObject().put("type", "integer"))
+                        .put("title", JSONObject().put("type", "string"))
+                        .put("startMs", JSONObject().put("type", "integer"))
+                        .put("endMs", JSONObject().put("type", "integer"))
+                        .put("description", JSONObject().put("type", "string"))
+                        .put("location", JSONObject().put("type", "string"))
+                        .put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("eventId").put("confirm"))))
+                tools.put(JSONObject().put("name", "calendar.delete")
+                    .put("description", "删除日历事件；需要 confirm=true。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("eventId", JSONObject().put("type", "integer"))
+                        .put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("eventId").put("confirm"))))
+            }
+            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (prefs.getBoolean(KEY_SHELL_ENABLED, false) && !prefs.getBoolean(KEY_LAN_ENABLED, false)) {
+                tools.put(JSONObject().put("name", "system.shell")
+                    .put("description", "执行一条 Android app-UID 下的本机 sh 命令；不是 ADB/root。仅loopback且LAN关闭时列出，命令与输出均有长度/超时上限。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("command", JSONObject().put("type", "string").put("description", "在本 App UID 权限范围内执行的 shell 命令，最多4096字符"))
+                        .put("timeoutMs", JSONObject().put("type", "integer").put("description", "超时毫秒，1000到15000，默认5000")))
+                        .put("required", JSONArray().put("command"))))
+            }
             return JSONObject().put("tools", tools)
         }
 
@@ -235,6 +363,24 @@ class McpService : Service() {
             return try {
                 val args = params.optJSONObject("arguments") ?: JSONObject()
                 val value = when (name) {
+                    "device.info" -> deviceInfo()
+                    "device.hardware" -> hardwareInfo()
+                    "device.apps.list" -> installedApps()
+                    "device.permissions.status" -> permissionStatus()
+                    "device.network" -> networkInfo()
+                    "device.telephony.status" -> telephonyStatus()
+                    "device.settings.brightness.get" -> brightnessGet()
+                    "device.settings.brightness.set" -> brightnessSet(args)
+                    "contacts.search" -> contactsSearch(args)
+                    "contacts.create" -> contactsCreate(args)
+                    "contacts.update" -> contactsUpdate(args)
+                    "contacts.delete" -> contactsDelete(args)
+                    "calendar.calendars" -> calendars()
+                    "calendar.list" -> calendarList(args)
+                    "calendar.create" -> calendarCreate(args)
+                    "calendar.update" -> calendarUpdate(args)
+                    "calendar.delete" -> calendarDelete(args)
+                    "system.shell" -> runLocalShell(args)
                     "device.battery" -> batteryInfo()
                     "device.location" -> lastKnownLocation()
                     "device.notifications" -> notifications()
@@ -250,6 +396,379 @@ class McpService : Service() {
 
         private fun toolResult(value: JSONObject) = JSONObject().put("content", JSONArray().put(JSONObject()
             .put("type", "text").put("text", value.toString())))
+
+        private fun hasPermission(permission: String): Boolean = app.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+
+        private fun canWriteData(): Boolean {
+            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_WRITES_ENABLED, false) && !prefs.getBoolean(KEY_LAN_ENABLED, false)
+        }
+
+        private fun requireWriteConsent(args: JSONObject) {
+            if (!canWriteData()) throw SecurityException("请在 App 中启用 MCP 写工具；LAN 开启时写工具强制关闭")
+            if (!args.optBoolean("confirm", false)) throw IllegalArgumentException("写操作必须显式传入 confirm=true")
+        }
+
+        private fun networkInfo(): JSONObject {
+            val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val network = cm.activeNetwork ?: return JSONObject().put("connected", false)
+            val caps = cm.getNetworkCapabilities(network)
+            val links = cm.getLinkProperties(network)
+            val transports = JSONArray()
+            if (caps != null) {
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) transports.put("wifi")
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)) transports.put("cellular")
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)) transports.put("ethernet")
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) transports.put("vpn")
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_BLUETOOTH)) transports.put("bluetooth")
+            }
+            val addresses = JSONArray()
+            links?.linkAddresses?.forEach { link -> addresses.put(link.address.hostAddress ?: "") }
+            return JSONObject().put("connected", caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true)
+                .put("transports", transports).put("interface", links?.interfaceName ?: JSONObject.NULL)
+                .put("addresses", addresses).put("dnsServers", JSONArray().apply { links?.dnsServers?.forEach { put(it.hostAddress ?: "") } })
+        }
+
+        @Suppress("MissingPermission")
+        private fun telephonyStatus(): JSONObject {
+            if (!hasPermission(android.Manifest.permission.READ_PHONE_STATE)) throw SecurityException("请先授予 READ_PHONE_STATE")
+            val tm = app.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            val out = JSONObject().put("phoneType", tm.phoneType).put("simState", tm.simState)
+                .put("networkType", tm.dataNetworkType).put("networkOperatorName", tm.networkOperatorName ?: "")
+                .put("dataState", tm.dataState).put("roaming", tm.isNetworkRoaming)
+            if (hasPermission(android.Manifest.permission.READ_PHONE_NUMBERS)) {
+                out.put("line1Number", runCatching { tm.line1Number }.getOrNull() ?: JSONObject.NULL)
+            }
+            return out
+        }
+
+        private fun brightnessGet(): JSONObject {
+            val resolver = app.contentResolver
+            return JSONObject()
+                .put("mode", Settings.System.getInt(resolver, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL))
+                .put("value", Settings.System.getInt(resolver, Settings.System.SCREEN_BRIGHTNESS, -1))
+        }
+
+        private fun brightnessSet(args: JSONObject): JSONObject {
+            if (!Settings.System.canWrite(app)) throw SecurityException("请先在系统设置中允许修改系统设置")
+            requireWriteConsent(args)
+            val value = args.optInt("value", -1)
+            if (value !in 0..255) throw IllegalArgumentException("value 必须在0到255")
+            val ok = Settings.System.putInt(app.contentResolver, Settings.System.SCREEN_BRIGHTNESS, value)
+            return JSONObject().put("updated", ok).put("brightness", value)
+        }
+
+        private fun contactsSearch(args: JSONObject): JSONObject {
+            if (!hasPermission(android.Manifest.permission.READ_CONTACTS)) throw SecurityException("请授予 READ_CONTACTS")
+            val query = args.optString("query").trim()
+            val limit = args.optInt("limit", 30).coerceIn(1, 100)
+            val projection = arrayOf(
+                ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
+                ContactsContract.CommonDataKinds.Phone.RAW_CONTACT_ID,
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER,
+                ContactsContract.CommonDataKinds.Phone.TYPE
+            )
+            val selection = if (query.isBlank()) null else
+                "${ContactsContract.Contacts.DISPLAY_NAME_PRIMARY} LIKE ? OR ${ContactsContract.CommonDataKinds.Phone.NUMBER} LIKE ?"
+            val selectionArgs = if (query.isBlank()) null else arrayOf("%$query%", "%$query%")
+            val rows = JSONArray()
+            app.contentResolver.query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI, projection, selection, selectionArgs,
+                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} COLLATE LOCALIZED ASC")?.use { cursor ->
+                val contactCol = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.CONTACT_ID)
+                val rawCol = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.RAW_CONTACT_ID)
+                val nameCol = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                val numberCol = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                val typeCol = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.TYPE)
+                var n = 0
+                while (cursor.moveToNext() && n < limit) {
+                    rows.put(JSONObject().put("contactId", cursor.getLong(contactCol))
+                        .put("rawContactId", cursor.getLong(rawCol)).put("name", cursor.getString(nameCol) ?: "")
+                        .put("phone", cursor.getString(numberCol) ?: "").put("phoneType", cursor.getInt(typeCol)))
+                    n++
+                }
+            }
+            return JSONObject().put("count", rows.length()).put("contacts", rows)
+        }
+
+        private fun contactsCreate(args: JSONObject): JSONObject {
+            if (!hasPermission(android.Manifest.permission.WRITE_CONTACTS)) throw SecurityException("请授予 WRITE_CONTACTS")
+            requireWriteConsent(args)
+            val name = args.optString("name").trim()
+            if (name.isBlank()) throw IllegalArgumentException("name 不能为空")
+            val rawValues = ContentValues().apply { putNull(ContactsContract.RawContacts.ACCOUNT_NAME); putNull(ContactsContract.RawContacts.ACCOUNT_TYPE) }
+            val rawUri = app.contentResolver.insert(ContactsContract.RawContacts.CONTENT_URI, rawValues)
+                ?: throw IllegalStateException("创建联系人记录失败")
+            val rawId = ContentUris.parseId(rawUri)
+            val nameValues = ContentValues().apply {
+                put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
+                put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE)
+                put(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name)
+            }
+            app.contentResolver.insert(ContactsContract.Data.CONTENT_URI, nameValues)
+            args.optString("phone").takeIf { it.isNotBlank() }?.let { phone ->
+                val values = ContentValues().apply {
+                    put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
+                    put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE)
+                    put(ContactsContract.CommonDataKinds.Phone.NUMBER, phone)
+                    put(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
+                }
+                app.contentResolver.insert(ContactsContract.Data.CONTENT_URI, values)
+            }
+            args.optString("email").takeIf { it.isNotBlank() }?.let { email ->
+                val values = ContentValues().apply {
+                    put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
+                    put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE)
+                    put(ContactsContract.CommonDataKinds.Email.ADDRESS, email)
+                    put(ContactsContract.CommonDataKinds.Email.TYPE, ContactsContract.CommonDataKinds.Email.TYPE_HOME)
+                }
+                app.contentResolver.insert(ContactsContract.Data.CONTENT_URI, values)
+            }
+            return JSONObject().put("created", true).put("rawContactId", rawId)
+        }
+
+        private fun contactsUpdate(args: JSONObject): JSONObject {
+            if (!hasPermission(android.Manifest.permission.WRITE_CONTACTS)) throw SecurityException("请授予 WRITE_CONTACTS")
+            requireWriteConsent(args)
+            val rawId = args.optLong("rawContactId", -1L)
+            if (rawId <= 0L) throw IllegalArgumentException("rawContactId 无效")
+            var changes = 0
+            if (args.has("name")) changes += upsertContactData(rawId, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE,
+                ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, args.optString("name"))
+            if (args.has("phone")) changes += upsertContactData(rawId, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE,
+                ContactsContract.CommonDataKinds.Phone.NUMBER, args.optString("phone"))
+            if (args.has("email")) changes += upsertContactData(rawId, ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE,
+                ContactsContract.CommonDataKinds.Email.ADDRESS, args.optString("email"))
+            if (changes == 0) throw IllegalArgumentException("至少提供 name、phone 或 email")
+            return JSONObject().put("updated", true).put("rawContactId", rawId).put("fieldsChanged", changes)
+        }
+
+        private fun upsertContactData(rawId: Long, mime: String, column: String, value: String): Int {
+            val resolver = app.contentResolver
+            val projection = arrayOf(ContactsContract.Data._ID)
+            val where = "${ContactsContract.Data.RAW_CONTACT_ID}=? AND ${ContactsContract.Data.MIMETYPE}=?"
+            val args = arrayOf(rawId.toString(), mime)
+            val rowId = resolver.query(ContactsContract.Data.CONTENT_URI, projection, where, args, null)?.use { c ->
+                if (c.moveToFirst()) c.getLong(0) else null
+            }
+            if (rowId != null) {
+                val values = ContentValues().apply { put(column, value) }
+                return resolver.update(ContentUris.withAppendedId(ContactsContract.Data.CONTENT_URI, rowId), values, null, null)
+            }
+            val values = ContentValues().apply {
+                put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
+                put(ContactsContract.Data.MIMETYPE, mime)
+                put(column, value)
+                if (mime == ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE) put(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
+                if (mime == ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE) put(ContactsContract.CommonDataKinds.Email.TYPE, ContactsContract.CommonDataKinds.Email.TYPE_HOME)
+            }
+            return if (resolver.insert(ContactsContract.Data.CONTENT_URI, values) != null) 1 else 0
+        }
+
+        private fun contactsDelete(args: JSONObject): JSONObject {
+            if (!hasPermission(android.Manifest.permission.WRITE_CONTACTS)) throw SecurityException("请授予 WRITE_CONTACTS")
+            requireWriteConsent(args)
+            val rawId = args.optLong("rawContactId", -1L)
+            if (rawId <= 0L) throw IllegalArgumentException("rawContactId 无效")
+            val deleted = app.contentResolver.delete(ContactsContract.RawContacts.CONTENT_URI,
+                "${ContactsContract.RawContacts._ID}=?", arrayOf(rawId.toString()))
+            return JSONObject().put("deleted", deleted > 0).put("rows", deleted).put("rawContactId", rawId)
+        }
+
+        private fun calendars(): JSONObject {
+            if (!hasPermission(android.Manifest.permission.READ_CALENDAR)) throw SecurityException("请授予 READ_CALENDAR")
+            val rows = JSONArray()
+            val projection = arrayOf(CalendarContract.Calendars._ID, CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
+                CalendarContract.Calendars.ACCOUNT_NAME, CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL)
+            app.contentResolver.query(CalendarContract.Calendars.CONTENT_URI, projection, null, null, null)?.use { c ->
+                while (c.moveToNext() && rows.length() < 100) {
+                    rows.put(JSONObject().put("calendarId", c.getLong(0)).put("name", c.getString(1) ?: "")
+                        .put("account", c.getString(2) ?: "").put("accessLevel", c.getInt(3)))
+                }
+            }
+            return JSONObject().put("count", rows.length()).put("calendars", rows)
+        }
+
+        private fun calendarList(args: JSONObject): JSONObject {
+            if (!hasPermission(android.Manifest.permission.READ_CALENDAR)) throw SecurityException("请授予 READ_CALENDAR")
+            val now = System.currentTimeMillis()
+            val start = args.optLong("startMs", now - 7L * 86400000L)
+            val end = args.optLong("endMs", now + 30L * 86400000L)
+            if (end <= start) throw IllegalArgumentException("endMs 必须大于 startMs")
+            val limit = args.optInt("limit", 100).coerceIn(1, 500)
+            val rows = JSONArray()
+            val projection = arrayOf(CalendarContract.Events._ID, CalendarContract.Events.CALENDAR_ID,
+                CalendarContract.Events.TITLE, CalendarContract.Events.DTSTART, CalendarContract.Events.DTEND,
+                CalendarContract.Events.EVENT_LOCATION, CalendarContract.Events.DESCRIPTION)
+            app.contentResolver.query(CalendarContract.Events.CONTENT_URI, projection,
+                "${CalendarContract.Events.DTSTART}>=? AND ${CalendarContract.Events.DTSTART}<=?",
+                arrayOf(start.toString(), end.toString()), "${CalendarContract.Events.DTSTART} ASC")?.use { c ->
+                while (c.moveToNext() && rows.length() < limit) {
+                    rows.put(JSONObject().put("eventId", c.getLong(0)).put("calendarId", c.getLong(1))
+                        .put("title", c.getString(2) ?: "").put("startMs", c.getLong(3)).put("endMs", c.getLong(4))
+                        .put("location", c.getString(5) ?: "").put("description", c.getString(6) ?: ""))
+                }
+            }
+            return JSONObject().put("count", rows.length()).put("events", rows).put("startMs", start).put("endMs", end)
+        }
+
+        private fun calendarCreate(args: JSONObject): JSONObject {
+            if (!hasPermission(android.Manifest.permission.WRITE_CALENDAR)) throw SecurityException("请授予 WRITE_CALENDAR")
+            requireWriteConsent(args)
+            val calendarId = args.optLong("calendarId", -1L)
+            val title = args.optString("title").trim()
+            val start = args.optLong("startMs", -1L)
+            val end = args.optLong("endMs", -1L)
+            if (calendarId <= 0L || title.isBlank() || start < 0L || end <= start) throw IllegalArgumentException("calendarId/title/startMs/endMs 参数无效")
+            val values = ContentValues().apply {
+                put(CalendarContract.Events.CALENDAR_ID, calendarId); put(CalendarContract.Events.TITLE, title)
+                put(CalendarContract.Events.DTSTART, start); put(CalendarContract.Events.DTEND, end)
+                put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+                if (args.has("description")) put(CalendarContract.Events.DESCRIPTION, args.optString("description"))
+                if (args.has("location")) put(CalendarContract.Events.EVENT_LOCATION, args.optString("location"))
+            }
+            val uri = app.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
+                ?: throw IllegalStateException("新建日历事件失败")
+            return JSONObject().put("created", true).put("eventId", ContentUris.parseId(uri)).put("calendarId", calendarId)
+        }
+
+        private fun calendarUpdate(args: JSONObject): JSONObject {
+            if (!hasPermission(android.Manifest.permission.WRITE_CALENDAR)) throw SecurityException("请授予 WRITE_CALENDAR")
+            requireWriteConsent(args)
+            val eventId = args.optLong("eventId", -1L)
+            if (eventId <= 0L) throw IllegalArgumentException("eventId 无效")
+            val values = ContentValues()
+            if (args.has("title")) values.put(CalendarContract.Events.TITLE, args.optString("title"))
+            if (args.has("startMs")) values.put(CalendarContract.Events.DTSTART, args.optLong("startMs"))
+            if (args.has("endMs")) values.put(CalendarContract.Events.DTEND, args.optLong("endMs"))
+            if (args.has("description")) values.put(CalendarContract.Events.DESCRIPTION, args.optString("description"))
+            if (args.has("location")) values.put(CalendarContract.Events.EVENT_LOCATION, args.optString("location"))
+            if (values.size() == 0) throw IllegalArgumentException("未提供可更新字段")
+            val updated = app.contentResolver.update(ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId), values, null, null)
+            return JSONObject().put("updated", updated > 0).put("rows", updated).put("eventId", eventId)
+        }
+
+        private fun calendarDelete(args: JSONObject): JSONObject {
+            if (!hasPermission(android.Manifest.permission.WRITE_CALENDAR)) throw SecurityException("请授予 WRITE_CALENDAR")
+            requireWriteConsent(args)
+            val eventId = args.optLong("eventId", -1L)
+            if (eventId <= 0L) throw IllegalArgumentException("eventId 无效")
+            val deleted = app.contentResolver.delete(ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId), null, null)
+            return JSONObject().put("deleted", deleted > 0).put("rows", deleted).put("eventId", eventId)
+        }
+
+        private fun deviceInfo(): JSONObject {
+            val activityManager = app.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val mem = ActivityManager.MemoryInfo().also { activityManager.getMemoryInfo(it) }
+            val stat = StatFs(Environment.getDataDirectory().absolutePath)
+            val dm = app.resources.displayMetrics
+            val abis = JSONArray().apply { Build.SUPPORTED_ABIS.forEach { put(it) } }
+            val version = runCatching { app.packageManager.getPackageInfo(app.packageName, 0).versionName }.getOrNull()
+            return JSONObject()
+                .put("manufacturer", Build.MANUFACTURER).put("brand", Build.BRAND)
+                .put("model", Build.MODEL).put("device", Build.DEVICE).put("product", Build.PRODUCT)
+                .put("board", Build.BOARD).put("hardware", Build.HARDWARE)
+                .put("buildFingerprint", Build.FINGERPRINT)
+                .put("androidRelease", Build.VERSION.RELEASE).put("sdkInt", Build.VERSION.SDK_INT)
+                .put("securityPatch", Build.VERSION.SECURITY_PATCH).put("supportedAbis", abis)
+                .put("appVersion", version ?: "unknown")
+                .put("screen", JSONObject().put("widthPx", dm.widthPixels).put("heightPx", dm.heightPixels)
+                    .put("densityDpi", dm.densityDpi).put("density", dm.density.toDouble()))
+                .put("memory", JSONObject().put("totalBytes", mem.totalMem).put("availableBytes", mem.availMem)
+                    .put("lowMemory", mem.lowMemory))
+                .put("dataStorage", JSONObject().put("totalBytes", stat.totalBytes).put("availableBytes", stat.availableBytes))
+                .put("locale", java.util.Locale.getDefault().toLanguageTag()).put("timeZone", TimeZone.getDefault().id)
+                .put("processUid", Process.myUid()).put("processId", Process.myPid())
+        }
+
+        private fun hardwareInfo(): JSONObject {
+            val features = JSONArray()
+            app.packageManager.systemAvailableFeatures.orEmpty().mapNotNull { it.name }.take(200).forEach { features.put(it) }
+            val sensors = JSONArray()
+            val manager = app.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+            manager.getSensorList(Sensor.TYPE_ALL).take(100).forEach { sensor ->
+                sensors.put(JSONObject().put("name", sensor.name).put("vendor", sensor.vendor)
+                    .put("type", sensor.type).put("version", sensor.version).put("wakeUp", sensor.isWakeUpSensor)
+                    .put("maxRange", sensor.maximumRange.toDouble()).put("resolution", sensor.resolution.toDouble())
+                    .put("powerMa", sensor.power.toDouble()))
+            }
+            return JSONObject().put("features", features).put("sensors", sensors)
+                .put("sensorCount", sensors.length()).put("hardware", Build.HARDWARE)
+                .put("supportedAbis", JSONArray().apply { Build.SUPPORTED_ABIS.forEach { put(it) } })
+        }
+
+        @Suppress("QueryAllPackagesPermission")
+        private fun installedApps(): JSONObject {
+            val rows = JSONArray()
+            val apps = app.packageManager.getInstalledApplications(PackageManager.MATCH_ALL)
+                .sortedBy { it.packageName }.take(2000)
+            for (info in apps) {
+                val label = runCatching { app.packageManager.getApplicationLabel(info).toString() }.getOrDefault(info.packageName)
+                val version = runCatching { app.packageManager.getPackageInfo(info.packageName, 0).versionName }.getOrNull()
+                rows.put(JSONObject().put("packageName", info.packageName).put("label", label)
+                    .put("versionName", version ?: JSONObject.NULL)
+                    .put("systemApp", (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0))
+            }
+            return JSONObject().put("count", rows.length()).put("apps", rows)
+        }
+
+        private fun permissionStatus(): JSONObject {
+            val packageInfo = app.packageManager.getPackageInfo(app.packageName, PackageManager.GET_PERMISSIONS)
+            val requested = JSONArray()
+            packageInfo.requestedPermissions.orEmpty().forEach { permission ->
+                requested.put(JSONObject().put("permission", permission)
+                    .put("granted", app.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED))
+            }
+            val special = JSONObject()
+                .put("notificationListener", notificationAccessGranted())
+                .put("usageStats", usageAccessGranted())
+                .put("allFiles", Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager())
+                .put("overlay", Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(app))
+                .put("writeSettings", Build.VERSION.SDK_INT < 23 || Settings.System.canWrite(app))
+                .put("lanEnabled", app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_LAN_ENABLED, false))
+                .put("localShellEnabled", app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_SHELL_ENABLED, false))
+                .put("dataWritesEnabled", app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_WRITES_ENABLED, false))
+            return JSONObject().put("requested", requested).put("special", special)
+        }
+
+        private fun runLocalShell(args: JSONObject): JSONObject {
+            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (!prefs.getBoolean(KEY_SHELL_ENABLED, false)) throw SecurityException("请先在 App 中启用本机 Shell")
+            if (prefs.getBoolean(KEY_LAN_ENABLED, false)) throw SecurityException("局域网监听启用时，本机 Shell 接口强制关闭")
+            val command = args.optString("command")
+            if (command.isBlank() || command.length > MAX_SHELL_COMMAND_CHARS) throw IllegalArgumentException("command 必须为1到4096字符")
+            val timeout = args.optInt("timeoutMs", 5000).coerceIn(1000, MAX_SHELL_TIMEOUT_MS)
+            val output = StringBuilder()
+            val truncated = AtomicBoolean(false)
+            val process = ProcessBuilder("/system/bin/sh", "-c", command).redirectErrorStream(true).start()
+            val reader = Thread {
+                runCatching {
+                    InputStreamReader(process.inputStream, Charsets.UTF_8).use { stream ->
+                        val buffer = CharArray(2048)
+                        while (true) {
+                            val count = stream.read(buffer)
+                            if (count < 0) break
+                            synchronized(output) {
+                                val remaining = MAX_SHELL_OUTPUT_CHARS - output.length
+                                if (remaining > 0) output.append(buffer, 0, minOf(count, remaining))
+                                if (count > remaining) truncated.set(true)
+                            }
+                        }
+                    }
+                }
+            }.apply { isDaemon = true; name = "mcp-shell-output"; start() }
+            val completed = process.waitFor(timeout.toLong(), TimeUnit.MILLISECONDS)
+            if (!completed) {
+                process.destroy()
+                if (!process.waitFor(250, TimeUnit.MILLISECONDS)) process.destroyForcibly()
+                process.waitFor()
+            }
+            reader.join(1000)
+            val text = synchronized(output) { output.toString() }
+            return JSONObject().put("uid", Process.myUid()).put("elevated", false)
+                .put("exitCode", if (completed) process.exitValue() else JSONObject.NULL)
+                .put("timedOut", !completed).put("truncated", truncated.get()).put("output", text)
+        }
 
         private fun batteryInfo(): JSONObject {
             val manager = app.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
@@ -334,6 +853,11 @@ class McpService : Service() {
         private const val PREFS = "mcp_server"
         private const val KEY_LAN_ENABLED = "lan_enabled"
         private const val KEY_LAN_HOSTS = "lan_hosts"
+        private const val KEY_SHELL_ENABLED = "local_shell_enabled"
+        private const val KEY_WRITES_ENABLED = "data_writes_enabled"
+        private const val MAX_SHELL_COMMAND_CHARS = 4096
+        private const val MAX_SHELL_OUTPUT_CHARS = 32768
+        private const val MAX_SHELL_TIMEOUT_MS = 15000
         private const val IPV4_LOOPBACK = "127.0.0.1"
         private const val IPV6_LOOPBACK = "::1"
         private const val CHANNEL_ID = "mcp_server"

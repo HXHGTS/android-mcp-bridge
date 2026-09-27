@@ -29,7 +29,11 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var endpointView: TextView
     private lateinit var lanSwitch: Switch
+    private lateinit var shellSwitch: Switch
+    private lateinit var writesSwitch: Switch
     private var changingLanSwitch = false
+    private var changingShellSwitch = false
+    private var changingWritesSwitch = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,7 +52,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
         setContentView(scroll)
 
-        root.addView(text("Android MCP Bridge · Lite", 25f, true))
+        root.addView(text("Android MCP Bridge", 25f, true))
         root.addView(text("本机 MCP 服务，无令牌认证；权限由你在安卓系统中逐项确认。", 15f, false, 0xFF49454F.toInt()))
         root.addView(spacer(14))
         status = text("权限状态读取中…", 14f, true)
@@ -85,11 +89,33 @@ class MainActivity : Activity() {
             setOnCheckedChangeListener { _, checked -> onLanSwitchChanged(checked) }
         }
         root.addView(lanSwitch)
-        root.addView(text("关闭时仅本机 127.0.0.1 与 ::1 可连接。开启后仅绑定 Wi‑Fi 私有 IPv4 / IPv6 ULA 地址，不绑定蜂窝网接口或公网 IPv6；局域网内其他设备无需令牌即可访问 MCP 数据。开启前会再次确认。", 13f, false, 0xFF8B2E2E.toInt()))
+        root.addView(text("关闭时仅本机 127.0.0.1 与 ::1 可连接。开启后仅绑定 Wi‑Fi 私有 IPv4 / IPv6 ULA 地址，不绑定蜂窝网接口或公网 IPv6；局域网内其他设备无需令牌即可访问 MCP 数据。开启前会再次确认，并自动关闭 Shell 工具。", 13f, false, 0xFF8B2E2E.toInt()))
+
+        root.addView(spacer(12))
+        root.addView(text("本机 Shell（默认关闭）", 18f, true))
+        shellSwitch = Switch(this).apply {
+            text = "允许 MCP 调用 app-UID Shell"
+            textSize = 15f
+            isChecked = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_SHELL_ENABLED, false)
+            setOnCheckedChangeListener { _, checked -> onShellSwitchChanged(checked) }
+        }
+        root.addView(shellSwitch)
+        root.addView(text("这是 Android App 自身 UID 下的 sh，不是 ADB、Shizuku 或 root。启用后仅在 LAN 关闭时注册 system.shell；同一手机上的其他 App 仍可能访问无令牌 loopback MCP。启用前需确认。", 13f, false, 0xFF8B2E2E.toInt()))
+
+        root.addView(spacer(12))
+        root.addView(text("MCP 数据写入（默认关闭）", 18f, true))
+        writesSwitch = Switch(this).apply {
+            text = "允许联系人/日历等写工具"
+            textSize = 15f
+            isChecked = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_WRITES_ENABLED, false)
+            setOnCheckedChangeListener { _, checked -> onWritesSwitchChanged(checked) }
+        }
+        root.addView(writesSwitch)
+        root.addView(text("写工具只在 LAN 关闭且你确认启用时注册。单次写入需传 confirm=true；无令牌意味着同手机其他 App 也可能访问 loopback，请只连接可信 Agent。", 13f, false, 0xFF8B2E2E.toInt()))
 
         root.addView(spacer(14))
         root.addView(text("当前 MCP 工具", 18f, true))
-        root.addView(text("• device.battery：电量、充电状态、省电模式\n• device.location：系统缓存的最后位置（需定位授权）\n• device.notifications：当前活动通知标题/正文（需通知读取授权）\n• device.usage：近 1–168 小时应用前台使用时长（需使用情况访问授权）", 14f, false, 0xFF49454F.toInt()))
+        root.addView(text("• device.info / device.hardware：系统与硬件、传感器概况\n• device.apps.list：已安装应用清单\n• device.permissions.status：权限状态\n• device.battery：电量、充电、省电模式\n• device.location：系统缓存的最后位置\n• device.notifications / device.usage：通知和使用时长\n• system.shell：启用后限本机、app UID、有超时/输出上限\n• contacts.* / calendar.*：授权后读写，写操作需用户开启写开关并显式 confirm", 14f, false, 0xFF49454F.toInt()))
         root.addView(text("没有发短信、拨号、删文件等写操作工具。通知、位置、使用情况都可能包含敏感信息。", 13f, false, 0xFF625B71.toInt()))
     }
 
@@ -118,6 +144,7 @@ class MainActivity : Activity() {
             Manifest.permission.CAMERA,
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.READ_PHONE_NUMBERS,
             Manifest.permission.BODY_SENSORS
         )
         if (Build.VERSION.SDK_INT >= 29) p += Manifest.permission.ACTIVITY_RECOGNITION
@@ -133,6 +160,7 @@ class MainActivity : Activity() {
             p += Manifest.permission.READ_MEDIA_AUDIO
         } else {
             p += Manifest.permission.READ_EXTERNAL_STORAGE
+            if (Build.VERSION.SDK_INT <= 28) p += Manifest.permission.WRITE_EXTERNAL_STORAGE
         }
         if (Build.VERSION.SDK_INT >= 34) p += Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
         return p.distinct()
@@ -171,16 +199,20 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         val running = prefs.getBoolean("running", false)
         val lanEnabled = prefs.getBoolean(KEY_LAN_ENABLED, false)
+        val shellEnabled = prefs.getBoolean(KEY_SHELL_ENABLED, false)
+        val writesEnabled = prefs.getBoolean(KEY_WRITES_ENABLED, false)
         val lanHosts = prefs.getStringSet(KEY_LAN_HOSTS, emptySet()).orEmpty().sorted()
         val lanUrls = lanHosts.map { hostToUrl(it) }
         endpointView.text = buildString {
             append(if (running) "服务运行中" else "服务尚未启动")
             append("\n本机 IPv4：$IPV4_URL\n本机 IPv6：$IPV6_URL")
-            append("\n局域网开关：${if (lanEnabled) "开" else "关"}")
+            append("\n局域网开关：${if (lanEnabled) "开" else "关"}；本机 Shell：${if (shellEnabled && !lanEnabled) "开" else "关"}；写工具：${if (writesEnabled && !lanEnabled) "开" else "关"}")
             if (lanEnabled) append("\n局域网地址：${if (lanUrls.isEmpty()) "未发现可绑定的 Wi‑Fi 私有地址" else lanUrls.joinToString("\n")}")
             append("\n监听状态：IPv4 ${if (prefs.getBoolean("ipv4_running", false)) "✓" else "×"} / IPv6 ${if (prefs.getBoolean("ipv6_running", false)) "✓" else "×"}")
         }
         setLanSwitchChecked(lanEnabled)
+        setShellSwitchChecked(shellEnabled && !lanEnabled)
+        setWritesSwitchChecked(writesEnabled && !lanEnabled)
     }
 
     private fun onLanSwitchChanged(checked: Boolean) {
@@ -192,15 +224,18 @@ class MainActivity : Activity() {
         setLanSwitchChecked(false)
         AlertDialog.Builder(this)
             .setTitle("开启局域网 MCP？")
-            .setMessage("开启后，同一 Wi‑Fi 局域网内的设备无需令牌即可读取本 App 暴露的工具数据。请只在可信网络启用；不会绑定蜂窝网或公网 IPv6。")
+            .setMessage("开启后，同一 Wi‑Fi 局域网内的设备无需令牌即可调用已暴露的 MCP 工具。本机 Shell 会自动关闭。请只在可信网络启用；不会绑定蜂窝网或公网 IPv6。")
             .setNegativeButton("保持关闭", null)
             .setPositiveButton("我了解，开启") { _, _ -> setLanEnabled(true) }
             .show()
     }
 
     private fun setLanEnabled(enabled: Boolean) {
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_LAN_ENABLED, enabled).apply()
+        val editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_LAN_ENABLED, enabled)
+        if (enabled) editor.putBoolean(KEY_SHELL_ENABLED, false).putBoolean(KEY_WRITES_ENABLED, false)
+        editor.apply()
         setLanSwitchChecked(enabled)
+        if (enabled) { setShellSwitchChecked(false); setWritesSwitchChecked(false) }
         if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("running", false)) {
             runCatching { startService(Intent(this, McpService::class.java).setAction(McpService.ACTION_RECONFIGURE)) }
         }
@@ -212,6 +247,67 @@ class MainActivity : Activity() {
         changingLanSwitch = true
         lanSwitch.isChecked = value
         changingLanSwitch = false
+    }
+
+    private fun onShellSwitchChanged(checked: Boolean) {
+        if (changingShellSwitch) return
+        if (!checked) { setShellEnabled(false); return }
+        setShellSwitchChecked(false)
+        if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_LAN_ENABLED, false)) {
+            Toast.makeText(this, "请先关闭局域网监听；Shell 永不通过 LAN 提供", Toast.LENGTH_LONG).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("启用本机 Shell 工具？")
+            .setMessage("命令以本 App UID 执行，不是 ADB/root；最大运行 15 秒、输出截断。MCP 无令牌，同手机其他 App 仍可能连接 loopback。只启用你信任的 Agent。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("我了解，启用") { _, _ -> setShellEnabled(true) }
+            .show()
+    }
+
+    private fun setShellEnabled(enabled: Boolean) {
+        val lan = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_LAN_ENABLED, false)
+        val value = enabled && !lan
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_SHELL_ENABLED, value).apply()
+        setShellSwitchChecked(value)
+        root.postDelayed({ refresh() }, 200)
+    }
+
+    private fun setShellSwitchChecked(value: Boolean) {
+        if (!::shellSwitch.isInitialized) return
+        changingShellSwitch = true
+        shellSwitch.isChecked = value
+        changingShellSwitch = false
+    }
+
+    private fun onWritesSwitchChanged(checked: Boolean) {
+        if (changingWritesSwitch) return
+        if (!checked) { setWritesEnabled(false); return }
+        setWritesSwitchChecked(false)
+        if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_LAN_ENABLED, false)) {
+            Toast.makeText(this, "请先关闭局域网监听；LAN 模式不开放写工具", Toast.LENGTH_LONG).show(); return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("启用 MCP 写工具？")
+            .setMessage("允许已授权的 MCP 工具新增/修改联系人和日历数据。删除工具还要求 confirm=true；LAN 开启时所有写工具自动关闭。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("我了解，启用") { _, _ -> setWritesEnabled(true) }
+            .show()
+    }
+
+    private fun setWritesEnabled(enabled: Boolean) {
+        val lan = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_LAN_ENABLED, false)
+        val value = enabled && !lan
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_WRITES_ENABLED, value).apply()
+        setWritesSwitchChecked(value)
+        root.postDelayed({ refresh() }, 200)
+    }
+
+    private fun setWritesSwitchChecked(value: Boolean) {
+        if (!::writesSwitch.isInitialized) return
+        changingWritesSwitch = true
+        writesSwitch.isChecked = value
+        changingWritesSwitch = false
     }
 
     private fun startMcp() {
@@ -283,6 +379,8 @@ class MainActivity : Activity() {
         private const val PREFS = "mcp_server"
         private const val KEY_LAN_ENABLED = "lan_enabled"
         private const val KEY_LAN_HOSTS = "lan_hosts"
+        private const val KEY_SHELL_ENABLED = "local_shell_enabled"
+        private const val KEY_WRITES_ENABLED = "data_writes_enabled"
         private const val REQUEST_RUNTIME = 301
         private const val REQUEST_BACKGROUND_LOCATION = 302
         private const val IPV4_URL = "http://127.0.0.1:18765/mcp"

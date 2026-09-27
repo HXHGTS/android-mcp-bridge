@@ -24,8 +24,8 @@ android {
         applicationId = "com.ikun.androidmcp"
         minSdk = 26
         targetSdk = 36
-        versionCode = providers.gradleProperty("appVersionCode").getOrElse("1").toInt()
-        versionName = providers.gradleProperty("appVersionName").getOrElse("0.1.0")
+        versionCode = providers.gradleProperty("appVersionCode").getOrElse("3000").toInt()
+        versionName = providers.gradleProperty("appVersionName").getOrElse("0.3.0")
     }
 
     signingConfigs {

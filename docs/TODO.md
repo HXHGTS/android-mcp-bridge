@@ -3,7 +3,7 @@
 ## P0：发布与基线
 - [x] push 只构建 artifact，Release workflow 手动触发、填写 tag 后才发布。
 - [x] 建立并备份固定 Release keystore；Actions signing secrets 已配置。
-- [x] 对当前 Gradle signed-release 配置完成 `assembleRelease` + `apksigner verify`；签名证书指纹与固定 keystore 一致。当前验证包仍只有现有4个MCP工具，不能视为权限/屏幕接口完成版。
+- [x] 对固定签名配置完成 `assembleRelease` + `apksigner verify`；签名证书指纹与 keystore 一致。该验证早于新增接口代码；当前工作树仍需 GitHub CI 编译。
 - [ ] Release gate：权限→工具矩阵无未映射项；Android 16/17 安装/授权测试通过；清单和工具描述一致。
 
 ## P1：权限—工具接口一一对应
@@ -35,3 +35,8 @@
 - [ ] 写操作确认队列：超时、拒绝、重复调用和审计记录测试。
 - [ ] 手动 workflow_dispatch 发布一个签名 Release，核验 APK 证书指纹与固定 keystore 一致。
 - [ ] 短信/通话记录：调查 Android 16/17 runtime 授权与公开分发政策，若作为侧载版功能启用，只读接口先行；不做静默发送/拨号。
+
+## 已加代码、待 GitHub CI 与实机核验
+- [x] `device.info` / `device.hardware` / `device.apps.list` / `device.permissions.status` / `device.network` / `device.telephony.status` / brightness 工具（GitHub CI待编译验证）。
+- [x] `system.shell` app-UID fallback：默认关闭、15秒/32KiB限额；LAN 开启时动态隐藏并拒绝执行（GitHub CI待编译验证）。
+- [ ] GitHub Actions 编译 + MCP tools/list/tool-call 验证；Android 16/17实机核验 `QUERY_ALL_PACKAGES` 返回范围与Shell开关。
