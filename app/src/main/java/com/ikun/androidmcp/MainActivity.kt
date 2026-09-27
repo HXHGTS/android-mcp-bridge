@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -38,8 +39,40 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
+        handleIntent(intent)
         maybeFirstRunPrompt()
         refresh()
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        when (intent?.action) {
+            ACTION_SCREEN_CAPTURE -> requestScreenProjection()
+            ACTION_CAPTURE_HINT -> root.postDelayed({ finish() }, 2500)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun requestScreenProjection() {
+        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        try {
+            startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_PROJECTION)
+        } catch (e: Exception) {
+            CaptureService.projectionDenied()
+        }
+    }
+
+    @Deprecated("Deprecated in Android framework")
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_PROJECTION) {
+            if (resultCode == RESULT_OK && data != null) {
+                CaptureService.projectionGranted(resultCode, data, applicationContext)
+            } else {
+                CaptureService.projectionDenied()
+            }
+            finish()
+        }
     }
 
     private fun buildUi() {
@@ -63,6 +96,7 @@ class MainActivity : Activity() {
         root.addView(spacer(10))
         root.addView(text("特殊访问（需在系统设置中手动开启）", 17f, true))
         root.addView(button("通知读取设置") { openSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS) })
+        root.addView(button("无障碍服务设置（屏幕操作）") { openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS) })
         root.addView(button("使用情况访问设置") { openSettings(Settings.ACTION_USAGE_ACCESS_SETTINGS) })
         root.addView(button("所有文件访问设置") { openSettings(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")) })
         root.addView(button("悬浮窗访问设置") { openSettings(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")) })
@@ -145,6 +179,10 @@ class MainActivity : Activity() {
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_PHONE_STATE,
             Manifest.permission.READ_PHONE_NUMBERS,
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.READ_CALL_LOG,
             Manifest.permission.BODY_SENSORS
         )
         if (Build.VERSION.SDK_INT >= 29) p += Manifest.permission.ACTIVITY_RECOGNITION
@@ -194,6 +232,7 @@ class MainActivity : Activity() {
         lines += "${if (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this)) "✓" else "○"} 悬浮窗"
         lines += "${if (Build.VERSION.SDK_INT < 23 || Settings.System.canWrite(this)) "✓" else "○"} 修改系统设置"
         if (Build.VERSION.SDK_INT >= 29) lines += "${if (checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED) "✓" else "○"} 后台定位"
+        lines += "${if (AccessibilityBridgeService.isEnabled(this)) "✓" else "○"} 无障碍屏幕操作"
         status.text = lines.joinToString("\n")
 
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
@@ -383,6 +422,9 @@ class MainActivity : Activity() {
         private const val KEY_WRITES_ENABLED = "data_writes_enabled"
         private const val REQUEST_RUNTIME = 301
         private const val REQUEST_BACKGROUND_LOCATION = 302
+        private const val REQUEST_PROJECTION = 501
+        const val ACTION_SCREEN_CAPTURE = "com.ikun.androidmcp.SCREEN_CAPTURE"
+        const val ACTION_CAPTURE_HINT = "com.ikun.androidmcp.CAPTURE_HINT"
         private const val IPV4_URL = "http://127.0.0.1:18765/mcp"
         private const val IPV6_URL = "http://[::1]:18765/mcp"
     }

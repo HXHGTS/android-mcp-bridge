@@ -225,6 +225,8 @@ class McpService : Service() {
 
         private fun toolList(): JSONObject {
             val tools = JSONArray()
+            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val lanOn = prefs.getBoolean(KEY_LAN_ENABLED, false)
             tools.put(JSONObject().put("name", "device.info")
                 .put("description", "读取 Android 版本、设备型号、ABI、屏幕、内存与存储等非序列号型设备信息。")
                 .put("inputSchema", emptySchema()))
@@ -242,11 +244,12 @@ class McpService : Service() {
                 .put("inputSchema", emptySchema()))
             if (canWriteData() && Settings.System.canWrite(app)) {
                 tools.put(JSONObject().put("name", "device.settings.brightness.set")
-                    .put("description", "设置亮度0–255；需系统 WRITE_SETTINGS 授权、写工具开关和 confirm=true。")
+                    .put("description", "设置亮度0–255与亮度模式（0=手动，1=自动）；需系统 WRITE_SETTINGS 授权、写工具开关和 confirm=true。")
                     .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
-                        .put("value", JSONObject().put("type", "integer"))
+                        .put("value", JSONObject().put("type", "integer").put("description", "亮度0–255；省略则只改模式"))
+                        .put("mode", JSONObject().put("type", "integer").put("description", "0=手动亮度，1=自动亮度；可选"))
                         .put("confirm", JSONObject().put("type", "boolean")))
-                        .put("required", JSONArray().put("value").put("confirm"))))
+                        .put("required", JSONArray().put("confirm"))))
             }
             tools.put(JSONObject().put("name", "device.network")
                 .put("description", "读取当前网络传输类型、接口及本机地址概况。")
@@ -344,13 +347,176 @@ class McpService : Service() {
                         .put("confirm", JSONObject().put("type", "boolean")))
                         .put("required", JSONArray().put("eventId").put("confirm"))))
             }
-            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            if (prefs.getBoolean(KEY_SHELL_ENABLED, false) && !prefs.getBoolean(KEY_LAN_ENABLED, false)) {
+            if (!lanOn) {
+                tools.put(JSONObject().put("name", "screen.status")
+                    .put("description", "读取无障碍、录屏、LAN、Shell、写工具开关状态。")
+                    .put("inputSchema", emptySchema()))
+                if (AccessibilityBridgeService.isEnabled(app)) {
+                    tools.put(JSONObject().put("name", "screen.tap")
+                        .put("description", "在屏幕坐标点击；需用户启用无障碍服务。")
+                        .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                            .put("x", JSONObject().put("type", "integer")).put("y", JSONObject().put("type", "integer")))
+                            .put("required", JSONArray().put("x").put("y"))))
+                    tools.put(JSONObject().put("name", "screen.swipe")
+                        .put("description", "从(x1,y1)滑动到(x2,y2)；需无障碍服务。")
+                        .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                            .put("x1", JSONObject().put("type", "integer")).put("y1", JSONObject().put("type", "integer"))
+                            .put("x2", JSONObject().put("type", "integer")).put("y2", JSONObject().put("type", "integer"))
+                            .put("durationMs", JSONObject().put("type", "integer")))
+                            .put("required", JSONArray().put("x1").put("y1").put("x2").put("y2"))))
+                    tools.put(JSONObject().put("name", "screen.key")
+                        .put("description", "执行系统导航：back/home/recents/notifications/quick_settings。")
+                        .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                            .put("action", JSONObject().put("type", "string")))
+                            .put("required", JSONArray().put("action"))))
+                    tools.put(JSONObject().put("name", "screen.text")
+                        .put("description", "向当前输入焦点设置文本；需无障碍服务。")
+                        .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                            .put("text", JSONObject().put("type", "string")))
+                            .put("required", JSONArray().put("text"))))
+                }
+                tools.put(JSONObject().put("name", "screen.screenshot")
+                    .put("description", "截取当前屏幕；系统弹 MediaProjection 授权，120秒内需确认；返回 JPEG base64 并存文件。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("maxWidth", JSONObject().put("type", "integer").put("description", "输出最大宽度240–2160，默认1080")))
+                        .put("required", JSONArray())))
+                tools.put(JSONObject().put("name", "screen.record.start")
+                    .put("description", "开始录屏（无声音）；系统弹授权确认；autoStopSeconds 后自动停止。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("autoStopSeconds", JSONObject().put("type", "integer").put("description", "5–600秒，默认60")))
+                        .put("required", JSONArray())))
+                tools.put(JSONObject().put("name", "screen.record.stop")
+                    .put("description", "停止录屏并返回文件路径与大小。")
+                    .put("inputSchema", emptySchema()))
+                if (hasPermission(android.Manifest.permission.CAMERA)) {
+                    tools.put(JSONObject().put("name", "camera.photo")
+                        .put("description", "拍照（无预览静拍，尽力而为）；保存 DCIM/AndroidMcpBridge 并返回 base64。")
+                        .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                            .put("facing", JSONObject().put("type", "string").put("description", "back 或 front，默认back")))
+                            .put("required", JSONArray())))
+                }
+                if (hasPermission(android.Manifest.permission.RECORD_AUDIO)) {
+                    tools.put(JSONObject().put("name", "audio.record")
+                        .put("description", "录音指定秒数（1–120），保存 m4a 并返回路径。")
+                        .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                            .put("seconds", JSONObject().put("type", "integer").put("description", "1–120秒，默认10")))
+                            .put("required", JSONArray())))
+                }
+            }
+            tools.put(JSONObject().put("name", "sensors.read")
+                .put("description", "一次性采样加速度/陀螺仪/磁场/光/距离/气压等传感器。")
+                .put("inputSchema", emptySchema()))
+            tools.put(JSONObject().put("name", "bluetooth.status")
+                .put("description", "读取蓝牙状态与已配对设备。")
+                .put("inputSchema", emptySchema()))
+            tools.put(JSONObject().put("name", "wifi.status")
+                .put("description", "读取 Wi-Fi 连接与网络接口信息。")
+                .put("inputSchema", emptySchema()))
+            tools.put(JSONObject().put("name", "clipboard.read")
+                .put("description", "读取剪贴板文本（后台访问可能被系统限制）。")
+                .put("inputSchema", emptySchema()))
+            tools.put(JSONObject().put("name", "clipboard.write")
+                .put("description", "写入剪贴板；需写工具开关与 confirm=true。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("text", JSONObject().put("type", "string")).put("confirm", JSONObject().put("type", "boolean")))
+                    .put("required", JSONArray().put("text").put("confirm"))))
+            tools.put(JSONObject().put("name", "media.list")
+                .put("description", "列出媒体库 images/videos/audio 元数据。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("type", JSONObject().put("type", "string").put("description", "images/videos/audio"))
+                    .put("limit", JSONObject().put("type", "integer")).put("offset", JSONObject().put("type", "integer")))
+                    .put("required", JSONArray())))
+            tools.put(JSONObject().put("name", "media.read")
+                .put("description", "按 id 读取媒体文件，≤5MB 返回 base64。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("type", JSONObject().put("type", "string")).put("id", JSONObject().put("type", "integer")))
+                    .put("required", JSONArray().put("type").put("id"))))
+            tools.put(JSONObject().put("name", "media.write")
+                .put("description", "写入媒体文件（≤10MB base64）；需写工具开关与 confirm=true。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("type", JSONObject().put("type", "string"))
+                    .put("fileName", JSONObject().put("type", "string"))
+                    .put("base64", JSONObject().put("type", "string"))
+                    .put("confirm", JSONObject().put("type", "boolean")))
+                    .put("required", JSONArray().put("type").put("fileName").put("base64").put("confirm"))))
+            tools.put(JSONObject().put("name", "media.delete")
+                .put("description", "按 id 删除媒体文件；需写工具开关与 confirm=true；删除他应用文件可能需系统授权。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("type", JSONObject().put("type", "string")).put("id", JSONObject().put("type", "integer"))
+                    .put("confirm", JSONObject().put("type", "boolean")))
+                    .put("required", JSONArray().put("type").put("id").put("confirm"))))
+            tools.put(JSONObject().put("name", "files.list")
+                .put("description", "列出 /storage/emulated/0 下目录内容（需所有文件访问授权）。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("path", JSONObject().put("type", "string").put("description", "相对主存储路径，空=根"))
+                    .put("limit", JSONObject().put("type", "integer")))
+                    .put("required", JSONArray())))
+            tools.put(JSONObject().put("name", "files.read")
+                .put("description", "读取文件，≤5MB 返回 base64；只允许主外部存储内。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("path", JSONObject().put("type", "string")))
+                    .put("required", JSONArray().put("path"))))
+            tools.put(JSONObject().put("name", "files.write")
+                .put("description", "写文件（≤10MB base64）；需写工具开关与 confirm=true。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("path", JSONObject().put("type", "string")).put("base64", JSONObject().put("type", "string"))
+                    .put("confirm", JSONObject().put("type", "boolean")))
+                    .put("required", JSONArray().put("path").put("base64").put("confirm"))))
+            tools.put(JSONObject().put("name", "files.delete")
+                .put("description", "删除文件/目录；需写工具开关与 confirm=true；非空目录需 recursive=true。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("path", JSONObject().put("type", "string"))
+                    .put("recursive", JSONObject().put("type", "boolean"))
+                    .put("confirm", JSONObject().put("type", "boolean")))
+                    .put("required", JSONArray().put("path").put("confirm"))))
+            if (hasPermission(android.Manifest.permission.READ_SMS)) {
+                tools.put(JSONObject().put("name", "sms.list")
+                    .put("description", "读取短信收件箱/已发/草稿（最新在前）。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("box", JSONObject().put("type", "string")).put("query", JSONObject().put("type", "string"))
+                        .put("limit", JSONObject().put("type", "integer")))
+                        .put("required", JSONArray())))
+            }
+            if (canWriteData() && hasPermission(android.Manifest.permission.SEND_SMS)) {
+                tools.put(JSONObject().put("name", "sms.send")
+                    .put("description", "发送短信；需写工具开关与 confirm=true。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("to", JSONObject().put("type", "string")).put("text", JSONObject().put("type", "string"))
+                        .put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("to").put("text").put("confirm"))))
+            }
+            if (hasPermission(android.Manifest.permission.READ_CALL_LOG)) {
+                tools.put(JSONObject().put("name", "calllog.list")
+                    .put("description", "读取最近通话记录。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("limit", JSONObject().put("type", "integer")))
+                        .put("required", JSONArray())))
+            }
+            tools.put(JSONObject().put("name", "phone.dial")
+                .put("description", "打开系统拨号界面并预填号码；不会自动拨出。")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                    .put("number", JSONObject().put("type", "string")))
+                    .put("required", JSONArray().put("number"))))
+            if (canWriteData() && hasPermission(android.Manifest.permission.CALL_PHONE)) {
+                tools.put(JSONObject().put("name", "phone.call")
+                    .put("description", "直接拨出电话；需写工具开关与 confirm=true。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("number", JSONObject().put("type", "string")).put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("number").put("confirm"))))
+            }
+            if (canWriteData() && notificationAccessGranted()) {
+                tools.put(JSONObject().put("name", "notifications.clear")
+                    .put("description", "按 key 清除一条活动通知；需写工具开关与 confirm=true。")
+                    .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
+                        .put("key", JSONObject().put("type", "string")).put("confirm", JSONObject().put("type", "boolean")))
+                        .put("required", JSONArray().put("key").put("confirm"))))
+            }
+            if (prefs.getBoolean(KEY_SHELL_ENABLED, false) && !lanOn) {
                 tools.put(JSONObject().put("name", "system.shell")
-                    .put("description", "执行一条 Android app-UID 下的本机 sh 命令；不是 ADB/root。仅loopback且LAN关闭时列出，命令与输出均有长度/超时上限。")
+                    .put("description", "执行一条 Android app-UID 下的本机 sh 命令；不是 ADB/root。仅loopback且LAN关闭时列出；命令≤4096字符、输出≤32KiB，时间不设上限（可用 timeoutMs 可选限制）。")
                     .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()
                         .put("command", JSONObject().put("type", "string").put("description", "在本 App UID 权限范围内执行的 shell 命令，最多4096字符"))
-                        .put("timeoutMs", JSONObject().put("type", "integer").put("description", "超时毫秒，1000到15000，默认5000")))
+                        .put("timeoutMs", JSONObject().put("type", "integer").put("description", "可选超时毫秒；0或省略表示不限时等待")))
                         .put("required", JSONArray().put("command"))))
             }
             return JSONObject().put("tools", tools)
@@ -381,6 +547,35 @@ class McpService : Service() {
                     "calendar.update" -> calendarUpdate(args)
                     "calendar.delete" -> calendarDelete(args)
                     "system.shell" -> runLocalShell(args)
+                    "sensors.read" -> DeviceProbe.sensorsRead(app, args)
+                    "bluetooth.status" -> DeviceProbe.bluetoothStatus(app)
+                    "wifi.status" -> DeviceProbe.wifiStatus(app)
+                    "clipboard.read" -> DeviceProbe.clipboardRead(app)
+                    "clipboard.write" -> { requireWriteConsent(args); DeviceProbe.clipboardWrite(app, args) }
+                    "media.list" -> MediaStoreKit.list(app, args)
+                    "media.read" -> MediaStoreKit.read(app, args)
+                    "media.write" -> { requireWriteConsent(args); MediaStoreKit.write(app, args) }
+                    "media.delete" -> { requireWriteConsent(args); MediaStoreKit.delete(app, args) }
+                    "files.list" -> MediaStoreKit.filesList(app, args)
+                    "files.read" -> MediaStoreKit.filesRead(app, args)
+                    "files.write" -> { requireWriteConsent(args); MediaStoreKit.filesWrite(app, args) }
+                    "files.delete" -> { requireWriteConsent(args); MediaStoreKit.filesDelete(app, args) }
+                    "sms.list" -> CommOps.smsList(app, args)
+                    "sms.send" -> { requireWriteConsent(args); CommOps.smsSend(app, args) }
+                    "calllog.list" -> CommOps.callLogList(app, args)
+                    "phone.dial" -> CommOps.phoneDial(app, args)
+                    "phone.call" -> { requireWriteConsent(args); CommOps.phoneCall(app, args) }
+                    "notifications.clear" -> { requireWriteConsent(args); CommOps.notificationsClear(app, args) }
+                    "screen.status" -> ScreenBridge.status(app)
+                    "screen.tap" -> ScreenBridge.tap(app, args)
+                    "screen.swipe" -> ScreenBridge.swipe(app, args)
+                    "screen.key" -> ScreenBridge.key(app, args)
+                    "screen.text" -> ScreenBridge.text(app, args)
+                    "screen.screenshot" -> ScreenBridge.screenshot(app, args)
+                    "screen.record.start" -> ScreenBridge.recordStart(app, args)
+                    "screen.record.stop" -> ScreenBridge.recordStop(app)
+                    "camera.photo" -> ScreenBridge.photo(app, args)
+                    "audio.record" -> ScreenBridge.audioRecord(app, args)
                     "device.battery" -> batteryInfo()
                     "device.location" -> lastKnownLocation()
                     "device.notifications" -> notifications()
@@ -452,10 +647,18 @@ class McpService : Service() {
         private fun brightnessSet(args: JSONObject): JSONObject {
             if (!Settings.System.canWrite(app)) throw SecurityException("请先在系统设置中允许修改系统设置")
             requireWriteConsent(args)
-            val value = args.optInt("value", -1)
-            if (value !in 0..255) throw IllegalArgumentException("value 必须在0到255")
-            val ok = Settings.System.putInt(app.contentResolver, Settings.System.SCREEN_BRIGHTNESS, value)
-            return JSONObject().put("updated", ok).put("brightness", value)
+            if (args.has("mode")) {
+                val mode = args.optInt("mode")
+                if (mode !in 0..1) throw IllegalArgumentException("mode 必须是0(手动)或1(自动)")
+                Settings.System.putInt(app.contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE, mode)
+            }
+            if (args.has("value")) {
+                val value = args.optInt("value")
+                if (value !in 0..255) throw IllegalArgumentException("value 必须在0到255")
+                Settings.System.putInt(app.contentResolver, Settings.System.SCREEN_BRIGHTNESS, value)
+            }
+            if (!args.has("mode") && !args.has("value")) throw IllegalArgumentException("至少提供 value 或 mode")
+            return brightnessGet().put("updated", true)
         }
 
         private fun contactsSearch(args: JSONObject): JSONObject {
@@ -737,7 +940,7 @@ class McpService : Service() {
             if (prefs.getBoolean(KEY_LAN_ENABLED, false)) throw SecurityException("局域网监听启用时，本机 Shell 接口强制关闭")
             val command = args.optString("command")
             if (command.isBlank() || command.length > MAX_SHELL_COMMAND_CHARS) throw IllegalArgumentException("command 必须为1到4096字符")
-            val timeout = args.optInt("timeoutMs", 5000).coerceIn(1000, MAX_SHELL_TIMEOUT_MS)
+            val timeoutMs = args.optInt("timeoutMs", 0)
             val output = StringBuilder()
             val truncated = AtomicBoolean(false)
             val process = ProcessBuilder("/system/bin/sh", "-c", command).redirectErrorStream(true).start()
@@ -757,7 +960,11 @@ class McpService : Service() {
                     }
                 }
             }.apply { isDaemon = true; name = "mcp-shell-output"; start() }
-            val completed = process.waitFor(timeout.toLong(), TimeUnit.MILLISECONDS)
+            val completed = if (timeoutMs > 0) {
+                process.waitFor(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            } else {
+                process.waitFor(); true
+            }
             if (!completed) {
                 process.destroy()
                 if (!process.waitFor(250, TimeUnit.MILLISECONDS)) process.destroyForcibly()
@@ -857,7 +1064,6 @@ class McpService : Service() {
         private const val KEY_WRITES_ENABLED = "data_writes_enabled"
         private const val MAX_SHELL_COMMAND_CHARS = 4096
         private const val MAX_SHELL_OUTPUT_CHARS = 32768
-        private const val MAX_SHELL_TIMEOUT_MS = 15000
         private const val IPV4_LOOPBACK = "127.0.0.1"
         private const val IPV6_LOOPBACK = "::1"
         private const val CHANNEL_ID = "mcp_server"

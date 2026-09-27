@@ -9,11 +9,13 @@ class NotificationCaptureService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         Cache.clear()
+        Cache.service = this
         Cache.setConnected(true)
         runCatching { activeNotifications?.forEach { Cache.put(it, packageName) } }
     }
 
     override fun onListenerDisconnected() {
+        Cache.service = null
         Cache.setConnected(false)
         Cache.clear()
         super.onListenerDisconnected()
@@ -30,6 +32,12 @@ class NotificationCaptureService : NotificationListenerService() {
     object Cache {
         private val items = LinkedHashMap<String, JSONObject>()
         @Volatile private var connected = false
+        @Volatile var service: NotificationCaptureService? = null
+
+        fun requestCancel(key: String): Boolean {
+            val instance = service ?: return false
+            return runCatching { instance.cancelNotification(key) }.isSuccess
+        }
 
         @Synchronized fun put(sbn: StatusBarNotification, ownPackage: String) {
             if (sbn.packageName == ownPackage) return
@@ -44,6 +52,7 @@ class NotificationCaptureService : NotificationListenerService() {
                 .put("text", text.take(800))
                 .put("postedAtMs", sbn.postTime)
                 .put("ongoing", sbn.isOngoing)
+            row.put("key", sbn.key)
             items[sbn.key] = row
             while (items.size > 100) items.remove(items.keys.first())
         }

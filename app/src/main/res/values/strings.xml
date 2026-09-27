@@ -1,0 +1,3 @@
+<resources>
+    <string name="accessibility_service_desc">允许 MCP 工具代表你执行点击、滑动、输入与系统导航等屏幕操作。仅在你手动启用后生效。</string>
+</resources>

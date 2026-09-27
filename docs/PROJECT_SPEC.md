@@ -26,7 +26,7 @@ Shizuku / ADB / 已 root provider 是可选 TODO：用户需先在系统/对应�
 
 ## 工具与权限映射
 
-详细矩阵见 [`PERMISSION_INTERFACE_MATRIX.md`](PERMISSION_INTERFACE_MATRIX.md)。目前代码实际可用工具包括设备/软件/权限信息、网络/电话状态、亮度、battery、缓存位置、通知、usage、通讯录与日历基础读写；用户确认开启后另有 loopback-only 的 app-UID system.shell。媒体文件、相机、屏幕与提权接口尚未完成，不能在 Release 说明中宣称已经支持。
+详细矩阵见 [`PERMISSION_INTERFACE_MATRIX.md`](PERMISSION_INTERFACE_MATRIX.md)。v0.4.0 批次后，工具覆盖：设备/软件/权限信息、网络/电话/SMS/通话记录、传感器、蓝牙/Wi-Fi、剪贴板、媒体库与文件读写、亮度(含mode)、通讯录/日历读写、通知读取与清除、截屏/录屏(MediaProjection 逐次授权)、无障碍屏幕操作、相机静拍、录音，以及不限时的 app-UID system.shell。以上均已写入代码但未经实机逐项验证；Shizuku/ADB/root 仍为 TODO。
 
 ## 当前权限完整性说明
 
