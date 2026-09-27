@@ -4,15 +4,25 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.ComponentName
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Path
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
+import android.util.Base64
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 class AccessibilityBridgeService : AccessibilityService() {
     override fun onServiceConnected() {
@@ -94,5 +104,56 @@ class AccessibilityBridgeService : AccessibilityService() {
             val ok = focus.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
             return JSONObject().put("input", ok)
         }
+
+        fun screenshotViaA11y(maxWidthArg: Int): JSONObject {
+            if (Build.VERSION.SDK_INT < 30) throw UnsupportedOperationException("无障碍截图需要 Android 11+（API 30）")
+            val service = requireInstance()
+            val maxWidth = maxWidthArg.coerceIn(240, 2160)
+            val latch = CountDownLatch(1)
+            val ref = AtomicReference<AccessibilityService.ScreenshotResult?>()
+            val err = AtomicReference<Exception?>()
+            val executor = Executor { command -> command.run() }
+            service.takeScreenshot(Display.DEFAULT_DISPLAY, executor, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) { ref.set(screenshot); latch.countDown() }
+                override fun onFailure(errorCode: Int) {
+                    err.set(IllegalStateException("无障碍截图失败 errorCode=$errorCode（4=调用间隔过短，等1秒重试）"))
+                    latch.countDown()
+                }
+            })
+            if (!latch.await(10, TimeUnit.SECONDS)) throw IllegalStateException("无障碍截图10秒未返回")
+            err.get()?.let { throw it }
+            val result = ref.get() ?: throw IllegalStateException("无障碍截图返回空结果")
+            val hardware = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                ?: throw IllegalStateException("硬件位图转换失败")
+            val software = try {
+                hardware.copy(Bitmap.Config.ARGB_8888, false) ?: throw IllegalStateException("位图复制失败")
+            } finally {
+                result.hardwareBuffer.close()
+            }
+            val scaled = scaleBitmap(software, maxWidth)
+            val bytes = compressJpeg(scaled, 70)
+            val dir = File(storageRoot(), "Pictures/AndroidMcpBridge").apply { mkdirs() }
+            val file = File(dir, "screenshot_${System.currentTimeMillis()}.jpg")
+            FileOutputStream(file).use { it.write(bytes) }
+            return JSONObject().put("via", "accessibility").put("path", file.absolutePath).put("sizeBytes", bytes.size)
+                .put("width", scaled.width).put("height", scaled.height)
+                .put("mime", "image/jpeg")
+                .put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+        }
+
+        private fun scaleBitmap(bitmap: Bitmap, maxWidth: Int): Bitmap {
+            if (bitmap.width <= maxWidth) return bitmap
+            val ratio = maxWidth.toFloat() / bitmap.width
+            return Bitmap.createScaledBitmap(bitmap, maxWidth, (bitmap.height * ratio).toInt().coerceAtLeast(1), true)
+        }
+
+        private fun compressJpeg(bitmap: Bitmap, quality: Int): ByteArray {
+            val output = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
+            return output.toByteArray()
+        }
+
+        @Suppress("DEPRECATION")
+        private fun storageRoot(): File = Environment.getExternalStorageDirectory()
     }
 }

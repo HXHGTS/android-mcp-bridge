@@ -48,6 +48,7 @@ object ScreenBridge {
         val prefs = app.getSharedPreferences("mcp_server", Context.MODE_PRIVATE)
         return JSONObject()
             .put("accessibilityEnabled", AccessibilityBridgeService.isEnabled(app))
+            .put("a11yScreenshotCapable", AccessibilityBridgeService.isEnabled(app) && Build.VERSION.SDK_INT >= 30)
             .put("recording", CaptureService.isRecording())
             .put("lanEnabled", prefs.getBoolean("lan_enabled", false))
             .put("shellEnabled", prefs.getBoolean("local_shell_enabled", false))
@@ -64,7 +65,15 @@ object ScreenBridge {
 
     fun screenshot(app: Context, args: JSONObject): JSONObject {
         refuseIfLan(app)
-        return CaptureService.requestScreenshot(app, args.optInt("maxWidth", 1080))
+        val maxWidth = args.optInt("maxWidth", 1080)
+        if (AccessibilityBridgeService.isEnabled(app)) {
+            try {
+                return AccessibilityBridgeService.screenshotViaA11y(maxWidth)
+            } catch (ignored: Throwable) {
+                // 无障碍通道不可用时回落到 MediaProjection（会弹授权框）
+            }
+        }
+        return CaptureService.requestScreenshot(app, maxWidth).put("via", "projection")
     }
 
     fun recordStart(app: Context, args: JSONObject): JSONObject {
