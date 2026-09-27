@@ -18,7 +18,6 @@ import android.util.Log
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.InetAddress
 
 class McpService : Service() {
     private var server: McpHttpServer? = null
@@ -78,7 +77,7 @@ class McpService : Service() {
             .build()
     }
 
-    private class McpHttpServer(context: Context) : NanoHTTPD(InetAddress.getByName("127.0.0.1"), PORT) {
+    private class McpHttpServer(context: Context) : NanoHTTPD("127.0.0.1", PORT) {
         private val app = context.applicationContext
 
         override fun serve(session: IHTTPSession): Response {
