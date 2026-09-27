@@ -3,7 +3,7 @@
 ## P0：发布与基线
 - [x] push 只构建 artifact，Release workflow 手动触发、填写 tag 后才发布。
 - [x] 建立并备份固定 Release keystore；Actions signing secrets 已配置。
-- [ ] 对当前 Gradle signed-release 变更做一次 `assembleRelease` + `apksigner verify` 端到端测试。
+- [x] 对当前 Gradle signed-release 配置完成 `assembleRelease` + `apksigner verify`；签名证书指纹与固定 keystore 一致。当前验证包仍只有现有4个MCP工具，不能视为权限/屏幕接口完成版。
 - [ ] Release gate：权限→工具矩阵无未映射项；Android 16/17 安装/授权测试通过；清单和工具描述一致。
 
 ## P1：权限—工具接口一一对应
