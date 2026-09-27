@@ -4,3 +4,8 @@ local.properties
 **/build/
 *.iml
 .DS_Store
+
+# Never commit release signing material
+*.jks
+*.keystore
+*.p12
