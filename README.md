@@ -48,6 +48,10 @@ GitHub Actions 在 push 到 `main` 后只构建 debug APK 并上传 30 天 artif
 
 本项目后续构建**完全在 GitHub Actions**执行，不在 SpeedyPage 或其他本机/服务器构建。push `main` 只产 debug artifact；带 tag 的手动 Release 也只由 GitHub Actions 构建。当前 `minSdk=26`、`targetSdk=36`。请从 Actions artifact 或 GitHub Release 获取 APK。允许本地静态检查源码，但不要在 SpeedyPage 构建 APK。
 
+## Agent Skill
+
+`skills/android-mcp-bridge/` 是配套的标准 Agent Skill：`SKILL.md` 给出工具清单、四档门禁、写操作/屏幕/敏感数据纪律和错误对照表；`scripts/mcp_call.py`（纯标准库）供未集成 MCP 的环境直接 JSON-RPC 调用（`list` / `call <tool> '<json>'`）。复制或链接该目录到客户端 skills 目录即可启用；脚本已在 v0.4.0（51 个工具）实测通过。
+
 ## 软件/硬件信息与本机 Shell
 
 工具列表还提供 `device.info`、`device.hardware`、`device.apps.list` 和 `device.permissions.status`。应用清单需要 `QUERY_ALL_PACKAGES`；该权限受应用商店政策限制，本仓库按侧载/自用项目说明，不保证可通过 Play 审核。设备序列号、IMEI、MAC 等受限标识不读取。
