@@ -13,6 +13,38 @@ App 提供复制按钮，并提供默认关闭的“允许同一局域网连接�
 
 MCP 使用 Streamable HTTP、协议版本 `2025-03-26`，不需要 Authorization Header。
 
+## 客户端 JSON 导入
+
+支持 JSON 导入的 MCP 客户端（RikkaHub、CherryStudio 等）可直接粘贴以下配置，无需任何认证头：
+
+```json
+{
+  "mcpServers": {
+    "android-mcp-bridge": {
+      "type": "streamableHttp",
+      "url": "http://127.0.0.1:18765/mcp"
+    }
+  }
+}
+```
+
+部分客户端不识别 `type` 字段，用精简形式即可：
+
+```json
+{
+  "mcpServers": {
+    "android-mcp-bridge": {
+      "url": "http://127.0.0.1:18765/mcp"
+    }
+  }
+}
+```
+
+- **IPv6 回环**：把 `url` 换成 `http://[::1]:18765/mcp`。
+- **开启 LAN 开关后**：把主机换成 App 状态页显示的局域网地址，如 `http://192.168.1.20:18765/mcp`。
+- 协议版本由 `initialize` 自动协商，不需要在 JSON 里写死。
+- 仅支持 HTTP 传输；只支持 stdio `command` 型配置的客户端无法使用本服务。
+
 ## 运行时权限
 
 界面提供一次性申请当前 Android 版本适用的常见运行时权限：位置、联系人、日历、相机、麦克风、电话状态、运动/身体传感器、蓝牙、附近 Wi-Fi、通知及媒体读取；后台定位单独申请。另提供通知读取、使用情况访问、所有文件访问、悬浮窗、修改系统设置、电池优化豁免的设置入口。安卓仍要求用户逐项批准；部分系统签名、设备所有者、root 或受平台政策限制的权限，普通 App 不能通过弹窗强行获得。

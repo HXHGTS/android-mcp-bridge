@@ -9,6 +9,23 @@ description: >-
 
 # Android MCP Bridge — Agent 操作手册
 
+## 客户端导入（JSON）
+
+支持 JSON 导入的 MCP 客户端直接粘贴（无认证头）：
+
+```json
+{
+  "mcpServers": {
+    "android-mcp-bridge": {
+      "type": "streamableHttp",
+      "url": "http://127.0.0.1:18765/mcp"
+    }
+  }
+}
+```
+
+客户端不识别 `type` 字段时删掉该行只留 `url`。IPv6 回环用 `http://[::1]:18765/mcp`；开启 LAN 后换成 App 显示的局域网地址。仅 HTTP 传输，不支持 stdio 型配置。
+
 ## 连接方式
 
 - IPv4：`http://127.0.0.1:18765/mcp`；IPv6：`http://[::1]:18765/mcp`
